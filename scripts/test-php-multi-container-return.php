@@ -10,9 +10,10 @@ function multiReturnExpectSame($expected, $actual, string $message, string $deta
     }
 }
 
-function multiReturnRequest(string $url, string $method, ?array $body = null, ?string $token = null): array {
+function multiReturnRequest(string $url, string $method, ?array $body = null, ?string $token = null, ?string $visitorSession = null): array {
     $headers = ['Content-Type: application/json'];
     if ($token !== null) $headers[] = 'Authorization: Bearer ' . $token;
+    if ($visitorSession !== null) $headers[] = 'X-Visitor-Session: ' . $visitorSession;
     $options = [
         'http' => [
             'method' => $method,
@@ -54,12 +55,63 @@ try {
     mkdir($testRoot . '/data', 0777, true);
     copy(__DIR__ . '/api-index.php', $testRoot . '/scripts/api-index.php');
     copy(__DIR__ . '/container-system.php', $testRoot . '/scripts/container-system.php');
+    copy(__DIR__ . '/dispatch-canonicalization.php', $testRoot . '/scripts/dispatch-canonicalization.php');
 
     $databasePath = $testRoot . '/data/sabaik.db';
     $pdo = new PDO('sqlite:' . $databasePath);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     hsPrepareServiceRequestsTable($pdo);
     hsEnsureSchema($pdo);
+    $pdo->exec("CREATE TABLE conversations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_name TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        email TEXT DEFAULT '',
+        subject TEXT,
+        package_id INTEGER,
+        package_name TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        last_message TEXT NOT NULL DEFAULT '',
+        unread_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )");
+    $pdo->exec("CREATE TABLE active_visitors (
+        session_id TEXT PRIMARY KEY,
+        page TEXT NOT NULL DEFAULT '/',
+        device_type TEXT NOT NULL DEFAULT 'desktop',
+        conversation_id INTEGER,
+        client_name TEXT,
+        phone TEXT,
+        invitation_message TEXT,
+        invitation_created_at TEXT,
+        last_seen TEXT NOT NULL
+    )");
+    $pdo->exec("CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id INTEGER NOT NULL,
+        sender_type TEXT NOT NULL,
+        content TEXT NOT NULL,
+        message_type TEXT DEFAULT 'text',
+        metadata TEXT,
+        attachment_url TEXT,
+        attachment_type TEXT,
+        location_lat TEXT,
+        location_lng TEXT,
+        location_label TEXT,
+        is_read TEXT DEFAULT 'false',
+        created_at TEXT NOT NULL
+    )");
+    $pdo->exec("CREATE TABLE notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'system',
+        is_read INTEGER NOT NULL DEFAULT 0,
+        ref_id INTEGER,
+        ref_type TEXT,
+        created_at TEXT NOT NULL
+    )");
     $pdo->exec("CREATE TABLE admins (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT NOT NULL UNIQUE,
@@ -176,6 +228,41 @@ try {
         usleep(100000);
     }
     if (!$ready) throw new RuntimeException('The isolated PHP API server did not become ready');
+
+    $ownerSession = 'TEST-ONLY-PHP-CONVERSATION-OWNER';
+    [$conversationStatus, $conversation, $conversationRaw] = multiReturnRequest(
+        $baseUrl . '/conversations',
+        'POST',
+        ['clientName' => 'TEST ONLY — Conversation owner', 'phone' => '0000000000'],
+        null,
+        $ownerSession,
+    );
+    multiReturnExpectSame(201, $conversationStatus, 'the public conversation should be created', $conversationRaw);
+    $conversationId = (int)($conversation['id'] ?? 0);
+    if ($conversationId <= 0) throw new RuntimeException('The public conversation did not return an ID');
+    $attackerSession = 'TEST-ONLY-PHP-CONVERSATION-OTHER';
+    [$heartbeatStatus] = multiReturnRequest(
+        $baseUrl . '/visitor/heartbeat',
+        'POST',
+        ['sessionId' => $attackerSession, 'conversationId' => $conversationId],
+    );
+    multiReturnExpectSame(200, $heartbeatStatus, 'public presence heartbeats should still be accepted');
+    [$ownerReadStatus] = multiReturnRequest(
+        $baseUrl . '/conversations/' . $conversationId . '/messages',
+        'GET',
+        null,
+        null,
+        $ownerSession,
+    );
+    multiReturnExpectSame(200, $ownerReadStatus, 'the owning visitor should retain access to the conversation');
+    [$otherReadStatus] = multiReturnRequest(
+        $baseUrl . '/conversations/' . $conversationId . '/messages',
+        'GET',
+        null,
+        null,
+        $attackerSession,
+    );
+    multiReturnExpectSame(403, $otherReadStatus, 'a heartbeat must not grant another visitor access to conversation messages');
 
     [$adminLoginStatus, $adminLogin, $adminLoginRaw] = multiReturnRequest($baseUrl . '/auth/login', 'POST', [
         'username' => 'multi-return-test-admin',

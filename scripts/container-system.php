@@ -268,6 +268,12 @@ function hsInitialFinancialStatus(string $requestedStatus): string {
     throw new RuntimeException('يجب بدء المستند المالي كمسودة أو إرساله للاعتماد؛ لا يُسمح بإنشائه مرحّلًا مباشرة');
 }
 
+function hsLegacyLedgerDirection(string $kind): string {
+    return in_array($kind, ['expense', 'payment_return', 'purchase', 'purchase_return', 'bank_fee'], true)
+        ? 'debit'
+        : 'credit';
+}
+
 function hsPostFinancialCore(PDO $pdo, string $kind, int $sourceId, array $payload, string $reference, ?int $actorId): void {
     $amount = (float)($payload['amount'] ?? $payload['total'] ?? 0);
     if ($amount <= 0) throw new RuntimeException('لا يمكن ترحيل قيمة مالية غير موجبة');
@@ -974,6 +980,63 @@ function hsValidateRecord(PDO $pdo, string $kind, array $payload, ?int $ignoreId
             }
         }
     }
+}
+
+function hsFinancialPostingInvariantIssue(PDO $pdo, string $kind, array $payload, int $currentRecordId): ?string {
+    $rows = array_map('hsRecord', hsFindRecords($pdo));
+    if ($kind === 'payment_return') {
+        $originalId = (int)($payload['originalPaymentId'] ?? 0);
+        $original = null;
+        foreach ($rows as $row) {
+            if ((int)$row['id'] === $originalId
+                && in_array($row['kind'], ['payment', 'receipt'], true)
+                && $row['status'] === 'posted') {
+                $original = $row;
+                break;
+            }
+        }
+        if (!$original) return 'السداد الأصلي للمرتجع غير موجود أو غير مرحّل';
+        $originalAmount = (float)($original['payload']['amount'] ?? 0);
+        $returned = 0.0;
+        foreach ($rows as $row) {
+            if ((int)$row['id'] === $currentRecordId || $row['kind'] !== 'payment_return' || $row['status'] !== 'posted') continue;
+            if ((int)($row['payload']['originalPaymentId'] ?? 0) === $originalId) {
+                $returned += (float)($row['payload']['amount'] ?? $row['payload']['total'] ?? 0);
+            }
+        }
+        if (is_finite($originalAmount)
+            && $returned + (float)($payload['amount'] ?? $payload['total'] ?? 0) > $originalAmount + 0.01) {
+            return 'قيمة مرتجع السداد تتجاوز قيمة السداد الأصلي';
+        }
+    }
+
+    if ($kind === 'invoice_return') {
+        $invoiceNumber = trim((string)($payload['invoiceNumber'] ?? $payload['originalInvoiceNumber'] ?? ''));
+        $invoice = null;
+        foreach ($rows as $row) {
+            if ($row['kind'] !== 'invoice' || $row['status'] === 'archived') continue;
+            if (trim((string)($row['payload']['invoiceNumber'] ?? $row['reference'] ?? '')) === $invoiceNumber) {
+                $invoice = $row;
+                break;
+            }
+        }
+        if (!$invoice) return 'الفاتورة الأصلية للمرتجع غير موجودة';
+        $invoiceTotal = (float)($invoice['payload']['total'] ?? $invoice['payload']['amount'] ?? 0);
+        $returned = 0.0;
+        foreach ($rows as $row) {
+            if ((int)$row['id'] === $currentRecordId || $row['kind'] !== 'invoice_return' || $row['status'] !== 'posted') continue;
+            $returnNumber = trim((string)($row['payload']['invoiceNumber'] ?? $row['payload']['originalInvoiceNumber'] ?? ''));
+            if ($returnNumber === $invoiceNumber) {
+                $returned += (float)($row['payload']['amount'] ?? $row['payload']['total'] ?? 0);
+            }
+        }
+        if (is_finite($invoiceTotal)
+            && $returned + (float)($payload['amount'] ?? $payload['total'] ?? 0) > $invoiceTotal + 0.01) {
+            return 'قيمة المرتجع تتجاوز الرصيد المتبقي من الفاتورة';
+        }
+    }
+
+    return null;
 }
 
 function hsAudit(PDO $pdo, int $recordId, string $kind, string $action, ?string $before, ?string $after, int $actorId): void {
@@ -2170,6 +2233,14 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                     $pdo->rollBack();
                     hsJson(['error' => 'تغير السجل أثناء التعديل؛ أعد تحميله قبل الحفظ'], $fresh ? 409 : 404);
                 }
+                if (in_array((string)$current['kind'], hsFinancialLifecycleKinds(), true)
+                    && $nextStatus === 'posted' && (string)$current['status'] !== 'posted') {
+                    $postingIssue = hsFinancialPostingInvariantIssue($pdo, (string)$current['kind'], $payload, $id);
+                    if ($postingIssue !== null) {
+                        $pdo->rollBack();
+                        hsJson(['error' => $postingIssue], 422);
+                    }
+                }
                 if ($fresh['kind'] === 'contract') {
                     if ($nextStatus !== (string)$fresh['status']) {
                         $pdo->rollBack();
@@ -2243,7 +2314,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                         'customerName' => $payload['customerName'] ?? '',
                         'customerRecordId' => isset($payload['customerRecordId']) ? (int)$payload['customerRecordId'] : null,
                         'amount' => (float)($payload['amount'] ?? $payload['total'] ?? 0),
-                        'direction' => in_array((string)$current['kind'], ['expense', 'payment_return', 'purchase', 'purchase_return'], true) ? 'debit' : 'credit',
+                        'direction' => hsLegacyLedgerDirection((string)$current['kind']),
                         'date' => $payload['date'] ?? date('Y-m-d'),
                     ];
                     if (isset($payload['allocations']) && is_array($payload['allocations'])) $ledger['allocations'] = $payload['allocations'];
@@ -2314,7 +2385,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                     'customerName' => $payload['customerName'] ?? '',
                     'customerRecordId' => isset($payload['customerRecordId']) ? (int)$payload['customerRecordId'] : null,
                     'amount' => (float)($payload['amount'] ?? $payload['total'] ?? 0),
-                    'direction' => in_array($kind, ['expense', 'payment_return', 'purchase', 'purchase_return', 'bank_fee'], true) ? 'debit' : 'credit',
+                    'direction' => hsLegacyLedgerDirection($kind),
                     'date' => $payload['date'] ?? date('Y-m-d'),
                 ];
                 if (isset($payload['allocations']) && is_array($payload['allocations'])) $ledger['allocations'] = $payload['allocations'];

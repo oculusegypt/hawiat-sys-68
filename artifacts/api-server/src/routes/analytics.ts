@@ -200,20 +200,11 @@ router.post("/visitor/heartbeat", async (req, res) => {
     const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim().slice(0, 160) : "";
     if (!sessionId) return res.status(400).json({ error: "sessionId required" });
 
-    const rawConversationId = body.conversationId;
-    const conversationId = rawConversationId === undefined || rawConversationId === null || rawConversationId === ""
-      ? null
-      : Number(rawConversationId);
-    if (conversationId !== null && (!Number.isInteger(conversationId) || conversationId <= 0)) {
-      return res.status(400).json({ error: "conversationId invalid" });
-    }
-
     const page = typeof body.page === "string" ? body.page.slice(0, 500) : "/";
     const deviceType = body.deviceType === "mobile" || body.deviceType === "tablet" ? body.deviceType : "desktop";
     const clientName = typeof body.clientName === "string" ? body.clientName.trim().slice(0, 160) : null;
     const phone = typeof body.phone === "string" ? body.phone.trim().slice(0, 40) : null;
     const lastSeen = isoNow();
-    const hasConversationId = Object.prototype.hasOwnProperty.call(body, "conversationId");
     const hasClientName = Object.prototype.hasOwnProperty.call(body, "clientName");
     const hasPhone = Object.prototype.hasOwnProperty.call(body, "phone");
 
@@ -221,7 +212,6 @@ router.post("/visitor/heartbeat", async (req, res) => {
       sessionId,
       page,
       deviceType,
-      conversationId,
       clientName,
       phone,
       lastSeen,
@@ -231,7 +221,6 @@ router.post("/visitor/heartbeat", async (req, res) => {
         page,
         deviceType,
         lastSeen,
-        ...(hasConversationId ? { conversationId } : {}),
         ...(hasClientName ? { clientName } : {}),
         ...(hasPhone ? { phone } : {}),
       },

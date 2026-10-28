@@ -5664,18 +5664,6 @@ try {
             exit;
         }
 
-        $conversationId = $input['conversationId'] ?? null;
-        if ($conversationId === '' || $conversationId === null) {
-            $conversationId = null;
-        } else {
-            $conversationId = filter_var($conversationId, FILTER_VALIDATE_INT);
-            if (!$conversationId || $conversationId <= 0) {
-                http_response_code(400);
-                echo json_encode(['error' => 'conversationId invalid'], JSON_UNESCAPED_UNICODE);
-                exit;
-            }
-        }
-
         $page = substr((string)($input['page'] ?? '/'), 0, 500) ?: '/';
         $deviceType = in_array($input['deviceType'] ?? '', ['mobile', 'tablet'], true) ? $input['deviceType'] : 'desktop';
         $clientName = isset($input['clientName']) ? substr(trim((string)$input['clientName']), 0, 160) : null;
@@ -5683,12 +5671,11 @@ try {
         $lastSeen = date('c');
 
         $stmt = $pdo->prepare(
-            "INSERT INTO active_visitors (session_id, page, device_type, conversation_id, client_name, phone, last_seen)
-             VALUES (:sid, :page, :device, :cid, :name, :phone, :seen)
+            "INSERT INTO active_visitors (session_id, page, device_type, client_name, phone, last_seen)
+             VALUES (:sid, :page, :device, :name, :phone, :seen)
              ON CONFLICT(session_id) DO UPDATE SET
                page = excluded.page,
                device_type = excluded.device_type,
-               conversation_id = COALESCE(excluded.conversation_id, active_visitors.conversation_id),
                client_name = COALESCE(excluded.client_name, active_visitors.client_name),
                phone = COALESCE(excluded.phone, active_visitors.phone),
                last_seen = excluded.last_seen"
@@ -5697,7 +5684,6 @@ try {
             ':sid' => $sessionId,
             ':page' => $page,
             ':device' => $deviceType,
-            ':cid' => $conversationId,
             ':name' => $clientName ?: null,
             ':phone' => $phone ?: null,
             ':seen' => $lastSeen,

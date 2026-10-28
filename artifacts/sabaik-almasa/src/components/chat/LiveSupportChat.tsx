@@ -305,7 +305,7 @@ function ChatInterface({ conversationId, clientName, phone, packageName, isSound
 
   useEffect(() => {
     const heartbeat = () => {
-      void sendVisitorHeartbeat({ conversationId, clientName, phone })
+      void sendVisitorHeartbeat({ clientName, phone })
     }
     heartbeat()
     const interval = setInterval(heartbeat, 15000)

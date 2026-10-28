@@ -22,8 +22,8 @@ const checks = [
   },
   {
     file: "artifacts/api-server/src/routes/serviceRequests.ts",
-    label: "driver transition protection",
-    patterns: ["requireDriver", "dispatchWindowsOverlap", "operationKey"],
+    label: "driver assignment conflict and retry guard",
+    patterns: ["requireDriver", "findScheduledDispatchConflict", "operationKey"],
   },
 ];
 

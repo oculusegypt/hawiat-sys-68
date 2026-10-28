@@ -1367,6 +1367,143 @@ async function main() {
     const releasedContainer = db.select().from(containerSystemRecordsTable)
       .where(eq(containerSystemRecordsTable.id, container.id)).get();
     assert.equal(releasedContainer?.status, "available");
+
+    const refundIds: number[] = [];
+    for (let index = 1; index <= 3; index += 1) {
+      const refundCreate = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization },
+        body: JSON.stringify({
+          kind: "payment_return",
+          status: "pending_approval",
+          payload: {
+            amount: 20,
+            date: "2026-08-11",
+            paymentMethod: "نقدي",
+            originalPaymentId: partialBody.payment.id,
+            operationKey: `TEST-LIFECYCLE-REFUND-${index}-001`,
+          },
+        }),
+      });
+      assert.equal(refundCreate.status, 201, await refundCreate.clone().text());
+      const refund = await refundCreate.json() as { id: number };
+      refundIds.push(refund.id);
+      const approval = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records/${refund.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", authorization },
+        body: JSON.stringify({ status: "approved" }),
+      });
+      assert.equal(approval.status, 200, await approval.clone().text());
+    }
+    const refundPostingResponses = await Promise.all(refundIds.map(id =>
+      fetch(`http://127.0.0.1:${port}/api/admin/container-system/records/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", authorization },
+        body: JSON.stringify({ status: "posted" }),
+      }),
+    ));
+    const postedRefundTotal = db.select().from(containerSystemRecordsTable).all()
+      .filter(record => record.kind === "payment_return" && record.status === "posted")
+      .filter(record => Number((JSON.parse(record.payload) as Record<string, unknown>).originalPaymentId) === partialBody.payment.id)
+      .reduce((sum, record) => sum + Number((JSON.parse(record.payload) as Record<string, unknown>).amount ?? 0), 0);
+    assert.ok(postedRefundTotal <= 50.01, "concurrent partial refunds must not exceed the original payment");
+    assert.ok(refundPostingResponses.some(response => response.status === 422),
+      "at least one concurrent refund that exceeds the original payment must be rejected");
+
+    const invoiceReturnIds: number[] = [];
+    for (let index = 1; index <= 3; index += 1) {
+      const returnCreate = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization },
+        body: JSON.stringify({
+          kind: "invoice_return",
+          status: "pending_approval",
+          payload: {
+            amount: 40,
+            date: "2026-08-11",
+            invoiceNumber: "TEST-INVOICE-001",
+            operationKey: `TEST-LIFECYCLE-INVOICE-RETURN-${index}-001`,
+          },
+        }),
+      });
+      assert.equal(returnCreate.status, 201, await returnCreate.clone().text());
+      const invoiceReturn = await returnCreate.json() as { id: number };
+      invoiceReturnIds.push(invoiceReturn.id);
+      const approval = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records/${invoiceReturn.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", authorization },
+        body: JSON.stringify({ status: "approved" }),
+      });
+      assert.equal(approval.status, 200, await approval.clone().text());
+    }
+    const invoiceReturnResponses = await Promise.all(invoiceReturnIds.map(id =>
+      fetch(`http://127.0.0.1:${port}/api/admin/container-system/records/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", authorization },
+        body: JSON.stringify({ status: "posted" }),
+      }),
+    ));
+    const postedInvoiceReturnTotal = db.select().from(containerSystemRecordsTable).all()
+      .filter(record => record.kind === "invoice_return" && record.status === "posted")
+      .filter(record => (JSON.parse(record.payload) as Record<string, unknown>).invoiceNumber === "TEST-INVOICE-001")
+      .reduce((sum, record) => sum + Number((JSON.parse(record.payload) as Record<string, unknown>).amount ?? 0), 0);
+    assert.ok(postedInvoiceReturnTotal <= 100.01, "concurrent invoice returns must not exceed the original invoice total");
+    assert.ok(invoiceReturnResponses.some(response => response.status === 422),
+      "at least one concurrent invoice return that exceeds the original invoice must be rejected");
+
+    const bankFeeCreate = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({
+        kind: "bank_fee",
+        status: "pending_approval",
+        payload: { amount: 5, date: "2026-08-11", operationKey: "TEST-LIFECYCLE-BANK-FEE-001" },
+      }),
+    });
+    assert.equal(bankFeeCreate.status, 201, await bankFeeCreate.clone().text());
+    const bankFee = await bankFeeCreate.json() as { id: number };
+    const bankFeeApproval = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records/${bankFee.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ status: "approved" }),
+    });
+    assert.equal(bankFeeApproval.status, 200, await bankFeeApproval.clone().text());
+    const bankFeePosting = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records/${bankFee.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ status: "posted" }),
+    });
+    assert.equal(bankFeePosting.status, 200, await bankFeePosting.clone().text());
+    const bankFeeLedger = db.select().from(containerSystemRecordsTable).all().find(record =>
+      record.kind === "ledger_entry" &&
+      Number((JSON.parse(record.payload) as Record<string, unknown>).sourceId) === bankFee.id,
+    );
+    assert.equal((JSON.parse(bankFeeLedger?.payload ?? "{}") as Record<string, unknown>).direction, "debit");
+
+    const ownerSession = "TEST-ONLY-NODE-CONVERSATION-OWNER";
+    const conversationCreate = await fetch(`http://127.0.0.1:${port}/api/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-visitor-session": ownerSession },
+      body: JSON.stringify({ clientName: "TEST ONLY — Conversation owner", phone: "0000000000" }),
+    });
+    assert.equal(conversationCreate.status, 201, await conversationCreate.clone().text());
+    const conversation = await conversationCreate.json() as { id: number };
+    const attackerSession = "TEST-ONLY-NODE-CONVERSATION-OTHER";
+    const heartbeat = await fetch(`http://127.0.0.1:${port}/api/visitor/heartbeat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: attackerSession, conversationId: conversation.id }),
+    });
+    assert.equal(heartbeat.status, 200);
+    const ownerMessages = await fetch(`http://127.0.0.1:${port}/api/conversations/${conversation.id}/messages`, {
+      headers: { "x-visitor-session": ownerSession },
+    });
+    assert.equal(ownerMessages.status, 200, "the conversation-creating visitor must retain access");
+    const otherMessages = await fetch(`http://127.0.0.1:${port}/api/conversations/${conversation.id}/messages`, {
+      headers: { "x-visitor-session": attackerSession },
+    });
+    assert.equal(otherMessages.status, 403, "an untrusted heartbeat must not authorize another visitor's conversation");
+
     console.log("container lifecycle integration assertions passed using isolated TEST ONLY data and synthetic admin login");
   } finally {
     apiProcess.kill("SIGTERM");

@@ -12,14 +12,14 @@ const SESSION_KEY = "sab_sid"
 const ATTRIBUTION_KEY = "sab_attribution"
 
 function createSessionId() {
-  try {
-    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-      return crypto.randomUUID()
-    }
-  } catch {
-    // Fall back for older browsers and restricted storage contexts.
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID()
   }
-  return `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = crypto.getRandomValues(new Uint8Array(16))
+    return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("")
+  }
+  throw new Error("Secure visitor sessions require browser cryptographic randomness")
 }
 
 function safeRead(key: string) {
@@ -191,7 +191,7 @@ export function getKnownCustomerInfo() {
   }
 }
 
-export async function sendVisitorHeartbeat(extra: { clientName?: string; phone?: string; conversationId?: number; lastOrderId?: number } = {}) {
+export async function sendVisitorHeartbeat(extra: { clientName?: string; phone?: string; lastOrderId?: number } = {}) {
   try {
     const tracking = getVisitorTracking()
     const known = getKnownCustomerInfo()
@@ -202,7 +202,6 @@ export async function sendVisitorHeartbeat(extra: { clientName?: string; phone?:
       deviceType: window.innerWidth < 768 ? "mobile" : "desktop",
       clientName: extra.clientName || known.clientName,
       phone: extra.phone || known.phone,
-      conversationId: extra.conversationId || known.conversationId,
       lastOrderId: extra.lastOrderId || known.lastOrderId,
     }
     await fetch(`${API_BASE}/api/visitor/heartbeat`, {

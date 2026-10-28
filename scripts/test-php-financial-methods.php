@@ -71,6 +71,7 @@ expectSame(0, (int)$pdo->query("SELECT COUNT(*) FROM financial_transactions WHER
 expectSame('draft', hsInitialFinancialStatus(''), 'New financial records default to draft');
 expectSame('draft', hsInitialFinancialStatus('draft'), 'Draft may be selected at creation');
 expectSame('pending_approval', hsInitialFinancialStatus('pending_approval'), 'Pending approval may be selected at creation');
+expectSame('debit', hsLegacyLedgerDirection('bank_fee'), 'Bank fees must be represented as debits in the legacy ledger projection');
 foreach (['approved', 'posted', 'rejected', 'cancelled', 'active'] as $invalidInitialStatus) {
     $statusRejected = false;
     try {
@@ -139,5 +140,32 @@ expectSame(2, (int)$identityPdo->query("SELECT COUNT(*) FROM container_system_re
     'repeated PHP backfill must reuse request-specific customer records');
 expectSame(1, (int)$identityPdo->query("SELECT COUNT(*) FROM container_system_records WHERE kind = 'customer_site'")->fetchColumn(),
     'repeated PHP backfill must reuse request-specific site records');
+
+    $insertPostingFixture = static function(string $kind, string $status, array $payload) use ($identityPdo): int {
+        $insert = $identityPdo->prepare("INSERT INTO container_system_records
+            (kind,status,reference,payload,created_at,updated_at) VALUES (?,?,?,?,datetime('now'),datetime('now'))");
+        $insert->execute([$kind, $status, 'TEST ONLY — financial posting invariant', json_encode($payload, JSON_UNESCAPED_UNICODE)]);
+        return (int)$identityPdo->lastInsertId();
+    };
+    $originalPaymentId = $insertPostingFixture('payment', 'posted', ['amount' => 50]);
+    $insertPostingFixture('payment_return', 'posted', ['amount' => 30, 'originalPaymentId' => $originalPaymentId]);
+    $pendingReturnId = $insertPostingFixture('payment_return', 'approved', ['amount' => 30, 'originalPaymentId' => $originalPaymentId]);
+    expectSame('قيمة مرتجع السداد تتجاوز قيمة السداد الأصلي',
+        hsFinancialPostingInvariantIssue($identityPdo, 'payment_return', ['amount' => 30, 'originalPaymentId' => $originalPaymentId], $pendingReturnId),
+        'PHP must recheck cumulative refunds against current posted records');
+    expectSame(null,
+        hsFinancialPostingInvariantIssue($identityPdo, 'payment_return', ['amount' => 20, 'originalPaymentId' => $originalPaymentId], $pendingReturnId),
+        'PHP must permit an exact remaining-balance refund');
+
+    $invoiceNumber = 'TEST ONLY — invoice return cap';
+    $insertPostingFixture('invoice', 'posted', ['invoiceNumber' => $invoiceNumber, 'total' => 100]);
+    $insertPostingFixture('invoice_return', 'posted', ['invoiceNumber' => $invoiceNumber, 'amount' => 60]);
+    $pendingInvoiceReturnId = $insertPostingFixture('invoice_return', 'approved', ['invoiceNumber' => $invoiceNumber, 'amount' => 50]);
+    expectSame('قيمة المرتجع تتجاوز الرصيد المتبقي من الفاتورة',
+        hsFinancialPostingInvariantIssue($identityPdo, 'invoice_return', ['invoiceNumber' => $invoiceNumber, 'amount' => 50], $pendingInvoiceReturnId),
+        'PHP must recheck cumulative invoice returns against current posted records');
+    expectSame(null,
+        hsFinancialPostingInvariantIssue($identityPdo, 'invoice_return', ['invoiceNumber' => $invoiceNumber, 'amount' => 40], $pendingInvoiceReturnId),
+        'PHP must permit an invoice return within the remaining balance');
 
 echo "PHP financial-method and initial-status assertions passed\n";

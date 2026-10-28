@@ -906,6 +906,60 @@ async function validateFinancialPayload(kind: string, payload: Record<string, un
   }
 }
 
+function financialPostingInvariantIssue(
+  records: typeof containerSystemRecordsTable.$inferSelect[],
+  kind: string,
+  payload: Record<string, unknown>,
+  currentRecordId: number,
+): string | null {
+  if (kind === "payment_return") {
+    const originalPaymentId = Number(payload.originalPaymentId ?? 0);
+    const originalPayment = records.find(record =>
+      record.id === originalPaymentId &&
+      ["payment", "receipt"].includes(record.kind) &&
+      isPosted(record),
+    );
+    if (!originalPayment) return "السداد الأصلي للمرتجع غير موجود أو غير مرحّل";
+    const originalAmount = Number(parsePayload(originalPayment.payload).amount ?? 0);
+    const returned = records
+      .filter(record =>
+        record.id !== currentRecordId &&
+        record.kind === "payment_return" &&
+        isPosted(record) &&
+        Number(parsePayload(record.payload).originalPaymentId ?? 0) === originalPaymentId,
+      )
+      .reduce((sum, record) => sum + Number(parsePayload(record.payload).amount ?? 0), 0);
+    if (Number.isFinite(originalAmount) &&
+        returned + Number(payload.amount ?? payload.total ?? 0) > originalAmount + 0.01) {
+      return "قيمة مرتجع السداد تتجاوز قيمة السداد الأصلي";
+    }
+  }
+
+  if (kind === "invoice_return") {
+    const invoiceNumber = String(payload.invoiceNumber ?? payload.originalInvoiceNumber ?? "").trim();
+    const invoice = records.find(record =>
+      record.kind === "invoice" &&
+      record.status !== "archived" &&
+      String(parsePayload(record.payload).invoiceNumber ?? record.reference).trim() === invoiceNumber,
+    );
+    if (!invoice) return "الفاتورة الأصلية للمرتجع غير موجودة";
+    const invoiceTotal = Number(parsePayload(invoice.payload).total ?? parsePayload(invoice.payload).amount ?? 0);
+    const returned = records
+      .filter(record => {
+        if (record.id === currentRecordId || record.kind !== "invoice_return" || !isPosted(record)) return false;
+        const returnPayload = parsePayload(record.payload);
+        return String(returnPayload.invoiceNumber ?? returnPayload.originalInvoiceNumber ?? "").trim() === invoiceNumber;
+      })
+      .reduce((sum, record) => sum + Number(parsePayload(record.payload).amount ?? 0), 0);
+    if (Number.isFinite(invoiceTotal) &&
+        returned + Number(payload.amount ?? payload.total ?? 0) > invoiceTotal + 0.01) {
+      return "قيمة المرتجع تتجاوز الرصيد المتبقي من الفاتورة";
+    }
+  }
+
+  return null;
+}
+
 async function hasDuplicateDocumentNumber(kind: string, payload: Record<string, unknown>, ignoredId?: number) {
   const fieldByKind: Record<string, string> = {
     contract: "contractNumber", invoice: "invoiceNumber", receipt: "receiptNumber",
@@ -3032,6 +3086,15 @@ router.patch("/admin/container-system/records/:id", async (req, res) => {
     if (!fresh) return { error: "السجل غير موجود", status: 404 as const };
     if (fresh.updatedAt !== current.updatedAt) {
       return { error: "تغير السجل أثناء التعديل؛ أعد تحميله قبل الحفظ", status: 409 as const };
+    }
+    if (financialLifecycleKinds.has(current.kind) && nextStatus === "posted" && current.status !== "posted") {
+      const postingIssue = financialPostingInvariantIssue(
+        tx.select().from(containerSystemRecordsTable).all(),
+        current.kind,
+        nextPayload,
+        id,
+      );
+      if (postingIssue) return { error: postingIssue, status: 422 as const };
     }
     if (fresh.kind === "contract") {
       if (body.status !== undefined && body.status !== fresh.status) {
