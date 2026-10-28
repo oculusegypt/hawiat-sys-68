@@ -55,9 +55,23 @@ $contractId = $insertRecord('contract', 'active', 'TEST-ONLY-CONTRACT-1', [
     'contractNumber' => 'TEST-ONLY-CONTRACT-1',
     'containerRecordId' => $containerId,
     'containerCode' => 'TEST-ONLY-ASSET-1',
+    'startDate' => '2026-10-01',
+    'endDate' => '2026-10-31',
     'total' => 100,
     'location' => 'TEST ONLY — customer site',
 ]);
+lifecycleExpectSame(true, hsContractHasOverlappingDates($pdo, [
+    'containerCode' => 'TEST-ONLY-ASSET-1',
+    'startDate' => '2026-10-15',
+    'endDate' => '2026-11-15',
+]), 'overlapping date ranges must be rejected for the same container');
+lifecycleExpectSame(false, hsContractHasOverlappingDates($pdo, [
+    'containerCode' => 'TEST-ONLY-ASSET-1',
+    'startDate' => '2026-10-15',
+    'endDate' => '2026-11-15',
+], $contractId), 'editing a contract must ignore its own record');
+lifecycleExpectSame(false, hsHasActiveContainerAssignment($pdo, $containerId),
+    'an asset without an active assignment must remain assignable');
 $contractRow = $pdo->query("SELECT * FROM container_system_records WHERE id = {$contractId}")->fetch(PDO::FETCH_ASSOC);
 $contractStatusIssue = hsProtectedRecordMutationIssue($contractRow, ['status' => 'returned']);
 lifecycleExpectSame(409, (int)($contractStatusIssue['status'] ?? 0),
@@ -83,8 +97,11 @@ $lineId = $insertRecord('contract_line', 'active', 'TEST-ONLY-LINE-1', [
 ]);
 $assignmentId = $insertRecord('container_assignment', 'active', 'TEST-ONLY-ASSIGNMENT-1', [
     'contractRecordId' => $contractId,
+    'containerRecordId' => $containerId,
     'assignmentStatus' => 'active',
 ]);
+lifecycleExpectSame(true, hsHasActiveContainerAssignment($pdo, $containerId),
+    'an active assignment must block another container contract');
 $manager = ['id' => 1, 'role' => 'manager'];
 
 lifecycleExpectFailure(

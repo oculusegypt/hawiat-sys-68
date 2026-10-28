@@ -821,6 +821,42 @@ function hsNormalizeFinancial(string $kind, array $payload): array {
     return $payload;
 }
 
+function hsContractHasOverlappingDates(PDO $pdo, array $payload, ?int $ignoreId = null): bool {
+    $containerCode = trim((string)($payload['containerCode'] ?? ''));
+    $start = strtotime((string)($payload['startDate'] ?? ''));
+    $end = strtotime((string)($payload['endDate'] ?? ''));
+    if ($containerCode === '' || $start === false || $end === false) return false;
+    foreach (hsFindRecords($pdo) as $row) {
+        if (($row['kind'] ?? '') !== 'contract'
+            || ($row['status'] ?? '') === 'archived'
+            || (int)($row['id'] ?? 0) === $ignoreId
+            || !in_array((string)($row['status'] ?? ''), ['active', 'issued', 'scheduled', 'delivered'], true)) {
+            continue;
+        }
+        $current = hsPayload($row['payload'] ?? '');
+        if (trim((string)($current['containerCode'] ?? '')) !== $containerCode) continue;
+        $currentStart = strtotime((string)($current['startDate'] ?? ''));
+        $currentEnd = strtotime((string)($current['endDate'] ?? ''));
+        if ($currentStart !== false && $currentEnd !== false && $start <= $currentEnd && $end >= $currentStart) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function hsHasActiveContainerAssignment(PDO $pdo, int $containerId): bool {
+    foreach (hsFindRecords($pdo) as $row) {
+        if (($row['kind'] ?? '') !== 'container_assignment' || ($row['status'] ?? '') === 'archived') continue;
+        $payload = hsPayload($row['payload'] ?? '');
+        $assignmentStatus = mb_strtolower((string)($payload['assignmentStatus'] ?? $row['status'] ?? ''));
+        if ((int)($payload['containerRecordId'] ?? 0) === $containerId
+            && in_array($assignmentStatus, ['reserved', 'active'], true)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function hsValidateRecord(PDO $pdo, string $kind, array $payload, ?int $ignoreId = null): void {
     $financial = ['payment', 'receipt', 'expense', 'deposit', 'bank_deposit', 'bank_fee', 'invoice', 'invoice_return',
         'payment_return', 'transfer', 'purchase', 'purchase_return', 'commission', 'salary_advance',
@@ -1765,6 +1801,9 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         $contract['siteRecordId'] = $siteId;
         $assignment['siteRecordId'] = $siteId;
         hsValidateRecord($pdo, 'contract', $contract);
+        if (hsContractHasOverlappingDates($pdo, $contract)) {
+            hsJson(['error' => 'الحاوية مرتبطة بعقد آخر خلال نفس الفترة'], 409);
+        }
         $contractNumber = trim((string)($contract['contractNumber'] ?? ''));
         if ($contractNumber !== '') {
             $duplicateNumber = $pdo->prepare("SELECT id FROM container_system_records WHERE kind = 'contract' AND reference = :reference AND status <> 'archived' LIMIT 1");
@@ -1774,6 +1813,22 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         $now = date('c');
         try {
             $pdo->beginTransaction();
+            $freshAsset = $find($pdo, $assetId);
+            if (!$freshAsset || !in_array($freshAsset['kind'], ['container', 'container_asset'], true) || $freshAsset['status'] === 'archived') {
+                throw new RuntimeException('أصل الحاوية غير موجود', 422);
+            }
+            $assetPayload = hsPayload($freshAsset['payload']);
+            $assetAvailability = hsCanonicalAssetStatus((string)($assetPayload['status'] ?? $freshAsset['status']), (string)$freshAsset['status']);
+            if (!in_array($assetAvailability, ['available', 'reserved', 'active'], true)) {
+                throw new RuntimeException('الحاوية ليست متاحة للتخصيص', 409);
+            }
+            if (hsHasActiveContainerAssignment($pdo, $assetId)) {
+                throw new RuntimeException('الحاوية مرتبطة بتخصيص نشط بالفعل', 409);
+            }
+            if (hsContractHasOverlappingDates($pdo, $contract)) {
+                throw new RuntimeException('الحاوية مرتبطة بعقد آخر خلال نفس الفترة', 409);
+            }
+            $asset = $freshAsset;
             if (!$site) {
                 $location = trim((string)($contract['location'] ?? ''));
                 if ($location === '') throw new RuntimeException('موقع العقد مطلوب');
@@ -1891,6 +1946,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         } catch (Throwable $error) {
             if ($pdo->inTransaction()) $pdo->rollBack();
             error_log('[container-system] contract workflow failed: ' . $error->getMessage());
+            if ((int)$error->getCode() === 409) hsJson(['error' => $error->getMessage()], 409);
             hsJson(['error' => 'تعذر إنشاء دورة العقد كاملة'], 422);
         }
     }
@@ -2250,6 +2306,11 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                         $pdo->rollBack();
                         hsJson(['error' => 'بدأ تنفيذ العقد أو سُجلت عليه حركة مالية؛ لا تعدّل شروطه مباشرة، ويلزم مسار تعديل تعاقدي موثق'], 409);
                     }
+                    if (in_array($nextStatus, ['active', 'issued', 'scheduled', 'delivered'], true)
+                        && hsContractHasOverlappingDates($pdo, $payload, $id)) {
+                        $pdo->rollBack();
+                        hsJson(['error' => 'الحاوية مرتبطة بعقد آخر خلال نفس الفترة'], 409);
+                    }
                 }
                 $now = date('c');
                 $pdo->prepare("UPDATE container_system_records SET status = :status, payload = :payload, updated_at = :updated_at WHERE id = :id")->execute([
@@ -2362,8 +2423,19 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             : (in_array($kind, hsFinancialLifecycleKinds(), true)
                 ? $initialFinancialStatus
                 : (string)($input['status'] ?? 'active'));
+        if ($kind === 'contract'
+            && in_array($status, ['active', 'issued', 'scheduled', 'delivered'], true)
+            && hsContractHasOverlappingDates($pdo, $payload)) {
+            hsJson(['error' => 'الحاوية مرتبطة بعقد آخر خلال نفس الفترة'], 409);
+        }
         $pdo->beginTransaction();
         try {
+            if ($kind === 'contract'
+                && in_array($status, ['active', 'issued', 'scheduled', 'delivered'], true)
+                && hsContractHasOverlappingDates($pdo, $payload)) {
+                $pdo->rollBack();
+                hsJson(['error' => 'الحاوية مرتبطة بعقد آخر خلال نفس الفترة'], 409);
+            }
             $now = date('c');
             $stmt = $pdo->prepare("INSERT INTO container_system_records (kind, status, reference, payload, operation_key, created_by, created_at, updated_at) VALUES (:kind, :status, '', :payload, :operation_key, :created_by, :created_at, :updated_at)");
             $stmt->execute([':kind' => $kind, ':status' => $status, ':payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':operation_key' => $operationKey !== '' ? $operationKey : null, ':created_by' => $actorId, ':created_at' => $now, ':updated_at' => $now]);

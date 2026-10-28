@@ -977,12 +977,15 @@ async function hasDuplicateDocumentNumber(kind: string, payload: Record<string, 
   );
 }
 
-async function hasOverlappingContract(payload: Record<string, unknown>, ignoredId?: number) {
+function hasOverlappingContractRows(
+  existing: typeof containerSystemRecordsTable.$inferSelect[],
+  payload: Record<string, unknown>,
+  ignoredId?: number,
+) {
   const containerCode = String(payload.containerCode ?? "").trim();
   const start = Date.parse(String(payload.startDate ?? ""));
   const end = Date.parse(String(payload.endDate ?? ""));
   if (!containerCode || !Number.isFinite(start) || !Number.isFinite(end)) return false;
-  const existing = await db.select().from(containerSystemRecordsTable);
   return existing.some(record => {
     if (record.kind !== "contract" || record.status === "archived" || record.id === ignoredId) return false;
     const current = parsePayload(record.payload);
@@ -993,6 +996,14 @@ async function hasOverlappingContract(payload: Record<string, unknown>, ignoredI
       Number.isFinite(currentStart) && Number.isFinite(currentEnd) &&
       start <= currentEnd && end >= currentStart;
   });
+}
+
+async function hasOverlappingContract(payload: Record<string, unknown>, ignoredId?: number) {
+  return hasOverlappingContractRows(
+    await db.select().from(containerSystemRecordsTable),
+    payload,
+    ignoredId,
+  );
 }
 
 const terminalOperationStatuses = new Set(["completed", "cancelled", "rejected", "closed"]);
@@ -1646,6 +1657,9 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
           )
         : undefined;
       if (activeAssignment) throw new Error("الحاوية مرتبطة بتخصيص نشط بالفعل");
+      if (hasOverlappingContractRows(tx.select().from(containerSystemRecordsTable).all(), contractPayload)) {
+        throw new Error("الحاوية مرتبطة بعقد آخر خلال نفس الفترة");
+      }
       const contract = tx.insert(containerSystemRecordsTable).values({
         kind: "contract", status: "active", reference: referenceFor("contract", contractPayload, Date.now()),
         payload: JSON.stringify(contractPayload), operationKey: operationKey || null, createdBy: adminReq.adminId,
@@ -1914,6 +1928,9 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
     });
      return res.status(201).json({ contract: formatRecord(result.contract), assignment: result.assignment ? formatRecord(result.assignment) : null, appointment: result.appointment ? formatRecord(result.appointment) : null, workOrder: result.workOrder ? formatRecord(result.workOrder) : null, serviceRequest: result.serviceRequest ?? null, invoice: result.invoice ? formatRecord(result.invoice) : null, rentalLine: result.rentalLine ? formatRecord(result.rentalLine) : null, idempotent: false });
   } catch (error) {
+    if (error instanceof Error && error.message === "الحاوية مرتبطة بعقد آخر خلال نفس الفترة") {
+      return res.status(409).json({ error: error.message });
+    }
     return res.status(422).json({ error: "تعذر إنشاء دورة العقد كاملة" });
   }
 });
@@ -2790,6 +2807,13 @@ router.post("/admin/container-system/records", async (req, res) => {
   let created: typeof containerSystemRecordsTable.$inferSelect;
   try {
     created = db.transaction((tx) => {
+      if (
+        kind === "contract" &&
+        ["active", "issued", "scheduled", "delivered"].includes(normalizedStatus) &&
+        hasOverlappingContractRows(tx.select().from(containerSystemRecordsTable).all(), payload)
+      ) {
+        throw new Error("الحاوية مرتبطة بعقد آخر خلال نفس الفترة");
+      }
       const inserted = tx.insert(containerSystemRecordsTable).values({
         kind,
         status: normalizedStatus,
@@ -2897,6 +2921,10 @@ router.post("/admin/container-system/records", async (req, res) => {
       return current;
     });
   } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "الحاوية مرتبطة بعقد آخر خلال نفس الفترة") {
+      return res.status(409).json({ error: message });
+    }
     return res.status(422).json({ error: "تعذر حفظ التخصيص بشكل كامل" });
   }
   if (kind === "contract") {
@@ -3100,7 +3128,14 @@ router.patch("/admin/container-system/records/:id", async (req, res) => {
       if (body.status !== undefined && body.status !== fresh.status) {
         return { error: "لا تغيّر حالة العقد مباشرة؛ استخدم إجراء دورة العقد المسجل بالحركة", status: 409 as const };
       }
-      if (contractPatchRequiresAmendment(fresh, nextPayload, tx.select().from(containerSystemRecordsTable).all())) {
+      const contractRecords = tx.select().from(containerSystemRecordsTable).all();
+      if (
+        ["active", "issued", "scheduled", "delivered"].includes(String(nextStatus)) &&
+        hasOverlappingContractRows(contractRecords, nextPayload, id)
+      ) {
+        return { error: "الحاوية مرتبطة بعقد آخر خلال نفس الفترة", status: 409 as const };
+      }
+      if (contractPatchRequiresAmendment(fresh, nextPayload, contractRecords)) {
         return {
           error: "بدأ تنفيذ العقد أو سُجلت عليه حركة مالية؛ لا تعدّل شروطه مباشرة، ويلزم مسار تعديل تعاقدي موثق",
           status: 409 as const,

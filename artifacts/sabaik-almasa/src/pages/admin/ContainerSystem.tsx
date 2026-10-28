@@ -33,7 +33,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from "@/components/ui/input"
 import { useToast } from "@/hooks/use-toast"
 import { useConfirm } from "@/components/admin/ConfirmDialog"
-import { getContainerOperationalStatus, getContainerVisualStatus } from "@/lib/containerStatusVisuals"
+import { getContainerOperationalStatus, getContainerVisualStatus, normalizeContainerLifecycleStatus } from "@/lib/containerStatusVisuals"
 import { ContainerStatusImage } from "@/components/admin/ContainerStatusImage"
 import {
   FIELD_CONFIG, KIND_ICONS, KIND_LABELS, RecordDialog, RecordKind, RecordStatus, amountOf, formatAuditAction, formatRecordDate, formatStatus,
@@ -1873,6 +1873,12 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
   const [, navigate] = useLocation()
   const isContainer = Boolean(record && ["container", "container_asset"].includes(record.kind))
   const { data: containerTypes = [] } = useGetContainers()
+  const [movementFilter, setMovementFilter] = useState<"all" | "movement" | "linked">("all")
+  const [expandedMovementIds, setExpandedMovementIds] = useState<number[]>([])
+  useEffect(() => {
+    setMovementFilter("all")
+    setExpandedMovementIds([])
+  }, [record?.id])
   if (!record) return null
   if (record.kind === "contract") return <ContractRecordDetails record={record} allRecords={allRecords} serviceRequests={serviceRequests} open={open} onOpenChange={onOpenChange} onContractAction={onContractAction} />
   const isPaymentRecord = ["payment", "receipt", "payment_return", "ledger_entry"].includes(record.kind)
@@ -1903,6 +1909,52 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
           String(payload.containerCode ?? "") === containerCode
       })
     : []
+  const operationalStatus = normalizeContainerLifecycleStatus(containerStatus).trim().toLowerCase().replaceAll(" ", "_")
+  const containerStatusLabels: Record<string, string> = {
+    available: "متاحة", reserved: "محجوزة", rented: "مؤجرة", with_customer: "لدى العميل",
+    in_transit: "في الطريق", awaiting_return: "بانتظار الاسترجاع", returned: "تم الاسترجاع", inspection: "تحت الفحص",
+    maintenance: "في الصيانة", damaged: "تالفة", lost: "مفقودة", out_of_service: "خارج الخدمة",
+    ready: "متاحة", "متاح": "متاحة", "متاحة": "متاحة", "محجوزة": "محجوزة", "مؤجرة": "مؤجرة",
+    "تحت الفحص": "تحت الفحص", "صيانة": "في الصيانة",
+  }
+  const statusLabel = containerStatusLabels[operationalStatus] ?? containerStatusLabels[String(containerStatus).trim()] ?? formatStatus(String(containerStatus))
+  const lifecycleStages = [
+    { key: "available", label: "متاحة" },
+    { key: "reserved", label: "محجوزة" },
+    { key: "in_transit", label: "في الطريق" },
+    { key: "rented", label: "مؤجرة" },
+    { key: "awaiting_return", label: "بانتظار الاسترجاع" },
+    { key: "returned", label: "تم الاسترجاع" },
+    { key: "inspection", label: "الفحص" },
+  ]
+  const stageForStatus: Record<string, number> = {
+    available: 0, reserved: 1, in_transit: 2, rented: 3, with_customer: 3, awaiting_return: 4, returned: 5, inspection: 6,
+  }
+  const lifecycleStage = stageForStatus[operationalStatus]
+  const isExceptionStatus = ["maintenance", "damaged", "lost", "out_of_service"].includes(operationalStatus)
+  const movementRecords = relatedContainerRecords
+    .filter(item => ["container_movement", "container_assignment", "contract"].includes(item.kind))
+    .sort((a, b) => {
+      const dateOf = (item: ContainerSystemRecord) => String((item.payload as Record<string, unknown>).movementDate ?? (item.payload as Record<string, unknown>).date ?? item.updatedAt ?? item.createdAt ?? "")
+      return dateOf(b).localeCompare(dateOf(a))
+    })
+  const visibleMovementRecords = movementRecords.filter(item => movementFilter === "all" || (movementFilter === "movement" ? item.kind === "container_movement" : item.kind !== "container_movement"))
+  const movementDate = (item: ContainerSystemRecord) => {
+    const payload = item.payload as Record<string, unknown>
+    return formatRecordDate(String(payload.movementDate ?? payload.date ?? item.updatedAt ?? item.createdAt ?? ""))
+  }
+  const movementSummary = (item: ContainerSystemRecord) => {
+    const payload = item.payload as Record<string, unknown>
+    const details = [
+      payload.location,
+      payload.driverName,
+      payload.vehiclePlate,
+      payload.contractNumber,
+      payload.assignmentStatus ? contractReadableValue(String(payload.assignmentStatus)) : undefined,
+    ]
+      .filter(value => value !== null && value !== undefined && String(value).trim())
+    return details.map(String).join(" · ") || "لا توجد تفاصيل إضافية مسجلة"
+  }
   const containerMovements = relatedContainerRecords.filter(item => item.kind === "container_movement").length
   const containerContracts = relatedContainerRecords.filter(item => item.kind === "contract" || item.kind === "container_assignment").length
   const customerName = String(detailPayload.name ?? detailPayload.customerName ?? "")
@@ -2112,7 +2164,112 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
                 <ContainerStatusImage status={containerStatus} code={containerCode} className="h-32 w-full max-w-[220px]" />
               </div>
             </div>
+            <div className="grid gap-4 border-t border-slate-100 bg-white p-4 sm:p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-black tracking-wide text-slate-400">الحالة التشغيلية الحالية</p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-black ${isExceptionStatus ? "border-rose-200 bg-rose-50 text-rose-800" : operationalStatus === "available" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : operationalStatus === "inspection" || operationalStatus === "maintenance" ? "border-amber-200 bg-amber-50 text-amber-800" : "border-cyan-200 bg-cyan-50 text-cyan-900"}`} data-testid={`container-operational-status-${record.id}`}>
+                      <span className={`h-2 w-2 rounded-full ${isExceptionStatus ? "bg-rose-500" : operationalStatus === "available" ? "bg-emerald-500" : operationalStatus === "inspection" || operationalStatus === "maintenance" ? "bg-amber-500" : "bg-cyan-600"}`} />
+                      {statusLabel}
+                    </span>
+                    <span className="text-[11px] text-slate-500">آخر حالة محفوظة للأصل</span>
+                  </div>
+                </div>
+                <div className="text-left text-[11px] text-slate-500">
+                  <span className="block font-bold text-slate-700">المسؤولية المسجلة</span>
+                  {linkedCustomerName !== "غير مرتبط بعميل" ? linkedCustomerName : String(containerPayload.location ?? "لا يوجد مسؤول أو موقع مرتبط")}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-[#f7faf9] p-4" aria-label="مراحل دورة الحاوية">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-black text-slate-900">مرحلة دورة الحاوية</p>
+                    <p className="mt-1 text-[10px] text-slate-500">{isExceptionStatus ? "الحاوية خارج المسار التشغيلي المعتاد" : lifecycleStage === undefined ? "لا توجد مرحلة دورة مؤكدة لهذه الحالة" : `المرحلة الحالية: ${lifecycleStages[lifecycleStage].label} · ترتيب الحالة فقط، وليس إثباتاً لإكمال المراحل السابقة`}</p>
+                  </div>
+                  <span className="font-mono text-[10px] text-slate-400" dir="ltr">{isExceptionStatus ? "EXCEPTION" : lifecycleStage === undefined ? "UNMAPPED" : `${lifecycleStage + 1} / ${lifecycleStages.length}`}</span>
+                </div>
+                {isExceptionStatus ? (
+                  <div className="flex items-center gap-2 rounded-xl border border-rose-200 bg-white px-3 py-2 text-xs font-bold text-rose-800">
+                    <AlertCircle size={15} /> {statusLabel} — يلزم اتباع إجراء الصيانة أو التحقق المعتمد قبل العودة للمسار التشغيلي.
+                  </div>
+                ) : (
+                  <ol className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
+                    {lifecycleStages.map((stage, index) => {
+                      const current = lifecycleStage === index
+                      return <li key={stage.key} aria-current={current ? "step" : undefined} className={`rounded-xl border px-2 py-2 text-center text-[10px] font-bold ${current ? "border-cyan-700 bg-cyan-800 text-white" : "border-slate-200 bg-white text-slate-400"}`}>
+                        <span className="block font-mono text-[9px] opacity-70">{String(index + 1).padStart(2, "0")}</span>{stage.label}
+                      </li>
+                    })}
+                  </ol>
+                )}
+              </div>
+            </div>
           </div>
+        )}
+        {isContainer && (
+          <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm" aria-labelledby={`container-movement-heading-${record.id}`}>
+            <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-3">
+                <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-cyan-50 text-cyan-800"><ArrowLeftRight size={18} /></span>
+                <div><h4 id={`container-movement-heading-${record.id}`} className="text-sm font-black text-slate-900">سجل الحركة والمسؤولية</h4><p className="mt-1 text-[11px] text-slate-500">أحداث مرتبطة بالسجل فقط؛ لا تُنشأ أو تُعدّل حالة الحاوية من هذه النافذة.</p></div>
+              </div>
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label="تصفية سجل الحركات">
+                {([
+                  ["all", `الكل (${movementRecords.length})`],
+                  ["movement", `الحركات (${movementRecords.filter(item => item.kind === "container_movement").length})`],
+                  ["linked", `العقود والتخصيص (${movementRecords.filter(item => item.kind !== "container_movement").length})`],
+                ] as const).map(([key, label]) => <button key={key} type="button" data-testid={`button-container-filter-${key}-${record.id}`} aria-pressed={movementFilter === key} onClick={() => setMovementFilter(key)} className={`rounded-full border px-3 py-1.5 text-[10px] font-black transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-700 focus-visible:ring-offset-2 ${movementFilter === key ? "border-cyan-800 bg-cyan-800 text-white" : "border-slate-200 bg-white text-slate-600 hover:border-cyan-300"}`}>{label}</button>)}
+              </div>
+            </div>
+            {visibleMovementRecords.length === 0 ? (
+              <div className="flex min-h-28 flex-col items-center justify-center px-5 text-center">
+                <p className="text-sm font-bold text-slate-700">لا توجد أحداث مرتبطة بهذا الاختيار</p>
+                <p className="mt-1 text-xs text-slate-500">ستظهر الحركات والعقود والتخصيصات المسجلة هنا عند ارتباطها بهذا الأصل.</p>
+              </div>
+            ) : (
+              <ol className="divide-y divide-slate-100">
+                {visibleMovementRecords.map((item, index) => {
+                  const payload = item.payload as Record<string, unknown>
+                  const expanded = expandedMovementIds.includes(item.id)
+                  const relatedContract = allRecords.find(candidate => candidate.kind === "contract" && candidate.id === Number(payload.contractRecordId ?? 0))
+                  const serviceRequestId = Number(payload.requestId ?? relatedContract?.payload.requestId ?? 0)
+                  const linkedServiceRequest = serviceRequests.find(request => request.id === serviceRequestId)
+                  const proof = String(payload.driverProofPhotoUrl ?? payload.proofPhotoUrl ?? linkedServiceRequest?.driverProofPhotoUrl ?? "").trim()
+                  const linkedName = item.kind === "contract"
+                    ? String(payload.contractNumber ?? item.reference ?? `عقد #${item.id}`)
+                    : item.kind === "container_assignment"
+                      ? contractReadableValue(String(payload.assignmentStatus ?? item.reference ?? `تخصيص #${item.id}`))
+                      : contractReadableValue(String(payload.movementType ?? "حركة تشغيلية"))
+                  return <li key={`${item.kind}-${item.id}`} className="px-4 py-3 sm:px-5">
+                    <div className="flex items-start gap-3">
+                      <span className={`mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${item.kind === "container_movement" ? "bg-cyan-50 text-cyan-800" : "bg-amber-50 text-amber-800"}`}>
+                        {item.kind === "container_movement" ? <Truck size={15} /> : item.kind === "contract" ? <FileText size={15} /> : <Link2 size={15} />}
+                      </span>
+                      <button type="button" data-testid={`button-container-event-${item.kind}-${item.id}`} aria-expanded={expanded} aria-controls={`container-event-detail-${record.id}-${item.id}`} onClick={() => setExpandedMovementIds(ids => expanded ? ids.filter(id => id !== item.id) : [...ids, item.id])} className="min-w-0 flex-1 rounded-lg text-right focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-700 focus-visible:ring-offset-2">
+                        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <span className="text-xs font-black text-slate-900">{linkedName}</span>
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-bold text-slate-500">{item.kind === "container_movement" ? "حركة" : item.kind === "contract" ? "عقد مرتبط" : "تخصيص مرتبط"}</span>
+                          <span className="mr-auto inline-flex items-center gap-1 text-[10px] font-bold text-cyan-800">{expanded ? "إخفاء التفاصيل" : "عرض التفاصيل"} <ChevronDown size={13} className={`transition-transform ${expanded ? "rotate-180" : ""}`} /></span>
+                        </span>
+                        <span className="mt-1 block text-[10px] text-slate-500">{movementDate(item)} · سجل #{item.id}</span>
+                        <span className="mt-1 block truncate text-[11px] text-slate-600">{movementSummary(item)}</span>
+                      </button>
+                    </div>
+                    {expanded && <div id={`container-event-detail-${record.id}-${item.id}`} className="mr-11 mt-3 grid gap-2 rounded-xl border border-slate-100 bg-slate-50 p-3 sm:grid-cols-2">
+                      <div><p className="text-[9px] font-bold text-slate-400">الجهة / السائق</p><p className="mt-1 break-words text-xs font-bold text-slate-800">{String(payload.receiverName ?? payload.driverName ?? linkedServiceRequest?.assignedDriverName ?? payload.customerName ?? "غير مسجل")}</p></div>
+                      <div><p className="text-[9px] font-bold text-slate-400">الموقع المسجل</p><p className="mt-1 break-words text-xs font-bold text-slate-800">{String(payload.location ?? linkedServiceRequest?.location ?? "غير مسجل")}</p></div>
+                      {Boolean(payload.vehiclePlate) && <div><p className="text-[9px] font-bold text-slate-400">المركبة</p><p className="mt-1 text-xs font-bold text-slate-800" dir="ltr">{String(payload.vehiclePlate)}</p></div>}
+                      {Boolean(payload.notes) && <div className="sm:col-span-2"><p className="text-[9px] font-bold text-slate-400">ملاحظات الحدث</p><p className="mt-1 whitespace-pre-line text-xs leading-6 text-slate-700">{String(payload.notes)}</p></div>}
+                      {proof && <a href={proof} target="_blank" rel="noopener noreferrer" data-testid={`link-container-event-proof-${item.id}`} className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-800 hover:underline"><ExternalLink size={13} /> فتح إثبات الحركة</a>}
+                      {relatedContract && <span className="text-[10px] text-slate-500">العقد المرتبط: {String(relatedContract.payload.contractNumber ?? relatedContract.reference ?? `#${relatedContract.id}`)}</span>}
+                      <span className="text-[10px] text-slate-400">{index + 1} من {visibleMovementRecords.length} · مصدر موثق #{item.id}</span>
+                    </div>}
+                  </li>
+                })}
+              </ol>
+            )}
+          </section>
         )}
         {isContainer && (
           <div className="grid gap-4 xl:grid-cols-[1.18fr_.82fr]">
