@@ -9,7 +9,7 @@
 - **مخطط قاعدة البيانات**: `pnpm --filter @workspace/db run push`
 - **إعادة تعبئة البيانات**: `pnpm --filter @workspace/db run seed`
 - **فحص الأنواع (Typecheck)**: `pnpm run typecheck`
-- **البناء الموحد لهوستنجر (Build Archive)**: `HOSTINGER_PRESERVE_SOURCE=1 node scripts/build-hostinger.mjs`
+- **البناء الموحد لهوستنجر (Build Archive)**: `node scripts/build-hostinger.mjs` — يحزم لقطة من قاعدة المعاينة الحالية دون استبدالها بنسخة أقدم أو تعديل محتواها للنشر.
 
 ## قاعدة البيانات (Database Architecture)
 
@@ -81,6 +81,7 @@ src/
 node scripts/build-hostinger.mjs
 ```
 ينتج الملف **`hawiat-sys-hostinger.zip`**. هذا الأمر يعمل في بيئة البناء فقط؛ لا يتم تشغيله على Hostinger.
+قاعدة المعاينة الحالية هي مصدر بيانات الأرشيف. تبقى تحويلات توافق المخطط ومسارات التشغيل فقط؛ لا تُطبّق تغييرات محتوى حصرية للأرشيف.
 
 توثيق آخر حزمة ونتائج فحصها موجود في:
 `docs/hostinger-build-2026-08-31.md`.

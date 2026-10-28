@@ -12,7 +12,7 @@ export default function WhyUsCommitment() {
   const { companyName } = useSiteSettings()
   useDocumentSEO({
     title: `التزامنا — ${companyName || "المنشأة"} | قيمنا ومبادئنا`,
-    description: `تعرف على قيم ومبادئ ${companyName || "المنشأة"} والتزامنا بتقديم حلول منظمة لتأجير الحاويات ونقل المخلفات في الرياض.`,
+    description: "تعرف على التزامنا بخدمة منظمة لتأجير الحاويات ونقل المخلفات في الرياض، من وضوح المواعيد إلى اختيار الحل المناسب لكل موقع ومشروع.",
     keywords: `التزام ${companyName || "المنشأة"}, قيم المؤسسة, جودة نقل مخلفات البناء`,
     canonical: siteUrl("/why-us/commitment"),
   })

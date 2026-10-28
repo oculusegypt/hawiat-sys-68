@@ -4,14 +4,8 @@
   <script>
     document.documentElement.classList.remove("no-js");
     document.documentElement.classList.add("js");
-    document.documentElement.classList.add("seo-static-pending");
-    // The root HTML is also the SPA fallback for admin and client-side
-    // routes. Only the homepage may use the static snapshot while settings
-    // load; every other route must expose its own app immediately.
-    const staticHandoffPath = window.location.pathname.replace(/\/+$/, "") || "/";
-    if (staticHandoffPath !== "/") {
-      document.documentElement.classList.remove("seo-static-pending");
-    }
+    // Keep the prerendered snapshot in the response for crawlers and no-JS
+    // visitors, but never show it briefly before the live React page loads.
   </script>
   <link rel="stylesheet" href="/seo-static.css" />
     <meta charset="UTF-8" />
@@ -46,7 +40,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;800;900&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
     <noscript><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;800;900&display=swap" rel="stylesheet" /></noscript>
 
-    <script type="module" crossorigin src="/assets/index-rvKYOZPl.js"></script>
+    <script type="module" crossorigin src="/assets/index-F21O2Bl6.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/vendor-react-CJ2juot7.js">
     <link rel="modulepreload" crossorigin href="/assets/vendor-radix-Bl8ImSNT.js">
     <link rel="modulepreload" crossorigin href="/assets/vendor-utils-2aDCGlvO.js">

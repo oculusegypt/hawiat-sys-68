@@ -2510,10 +2510,7 @@ const supportingSeoPages = [
     relPath: "why-us/leadership",
     canonicalPath: "/why-us/leadership",
     title: "قيادتنا — حلول الحاويات ونقل المخلفات",
-    description: normalizeMetaDescription(
-      `تعرف على قيادة ${siteCompanyName} ورؤيتها في تقديم حلول موثوقة لتأجير الحاويات ونقل مخلفات البناء في الرياض.`,
-      `قيادة ${siteCompanyName}`,
-    ),
+    description: "تعرّف على رؤية قيادتنا لتقديم خدمات موثوقة لتأجير الحاويات ونقل مخلفات البناء في الرياض، مع التركيز على تنظيم العمل وجودة التنفيذ.",
     keywords: `قيادة ${siteCompanyName}, رؤية المؤسسة, تأجير الحاويات بالرياض`,
     breadcrumbs: [{ name: "لماذا نحن", path: "/#about" }, { name: "القيادة", path: "/why-us/leadership" }],
     bodyContent: `
@@ -2551,10 +2548,7 @@ const supportingSeoPages = [
     relPath: "why-us/commitment",
     canonicalPath: "/why-us/commitment",
     title: `التزامنا — ${siteCompanyName} | قيمنا ومبادئنا`,
-    description: normalizeMetaDescription(
-      `تعرف على قيم ومبادئ ${siteCompanyName} والتزامنا بتقديم حلول منظمة لتأجير الحاويات ونقل المخلفات في الرياض.`,
-      `التزام ${siteCompanyName}`,
-    ),
+    description: "تعرف على التزامنا بخدمة منظمة لتأجير الحاويات ونقل المخلفات في الرياض، من وضوح المواعيد إلى اختيار الحل المناسب لكل موقع ومشروع.",
     keywords: `التزام ${siteCompanyName}, قيم المؤسسة, جودة نقل مخلفات البناء`,
     breadcrumbs: [{ name: "لماذا نحن", path: "/#about" }, { name: "التزامنا", path: "/why-us/commitment" }],
     bodyContent: `

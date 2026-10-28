@@ -36,9 +36,13 @@ function step(label) {
 const SOURCE_DB = join(ROOT, "data/sabaik.db");
 const ARCHIVE_SOURCE_DB = join(ROOT, "build_php/.archive-source.db");
 const ARCHIVE_FILENAME = "hawiat-sys-hostinger.zip";
-// Use HOSTINGER_PRESERVE_SOURCE=1 to package an unmodified SQLite snapshot
-// and media set, while allowing only explicit archive-copy metadata overrides.
-const PRESERVE_SOURCE_DATA = process.env.HOSTINGER_PRESERVE_SOURCE === "1";
+// Release packages must be built from the current preview database and content.
+// Keep the legacy opt-out explicit failure-prone rather than silently changing
+// preview data during packaging.
+if (process.env.HOSTINGER_PRESERVE_SOURCE === "0") {
+  throw new Error("Hostinger releases must preserve the current preview data.");
+}
+const PRESERVE_SOURCE_DATA = true;
 const ARCHIVE_ONLY_SEO_TITLE_OVERRIDES = [
   {
     postId: 4,
@@ -702,9 +706,6 @@ function copyDirRecursive(srcDir, dstDir, relativeDir = "") {
 }
 
 copyDirRecursive(distPublic, join(ROOT, "build_php"));
-if (PRESERVE_SOURCE_DATA) {
-  applyArchiveOnlySeoTitleOverridesToHtml(join(ROOT, "build_php"));
-}
 console.log("  ✅ تم نسخ جميع المجلدات والصفحات الثابتة إلى build_php/");
 
 // بعض السجلات القديمة في SQLite تشير إلى /images/<file> بينما الملف المصدر
@@ -851,10 +852,6 @@ copyFileSync(ARCHIVE_SOURCE_DB, DEST_DB);
 
 {
   const db = new Database(DEST_DB);
-
-  if (PRESERVE_SOURCE_DATA) {
-    applyArchiveOnlySeoTitleOverridesToDatabase(db);
-  }
 
   /**
    * الجداول التي يُنشئها Drizzle بعمود `order`

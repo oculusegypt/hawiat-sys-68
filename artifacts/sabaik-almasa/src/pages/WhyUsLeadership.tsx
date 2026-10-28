@@ -12,7 +12,7 @@ export default function WhyUsLeadership() {
   const { companyName } = useSiteSettings()
   useDocumentSEO({
     title: "قيادتنا — حلول الحاويات ونقل المخلفات",
-    description: `تعرف على قيادة ${companyName || "المنشأة"} ورؤيتها في تقديم حلول موثوقة لتأجير الحاويات ونقل مخلفات البناء في الرياض.`,
+    description: "تعرّف على رؤية قيادتنا لتقديم خدمات موثوقة لتأجير الحاويات ونقل مخلفات البناء في الرياض، مع التركيز على تنظيم العمل وجودة التنفيذ.",
     keywords: `قيادة ${companyName || "المنشأة"}, رؤية المؤسسة, تأجير الحاويات بالرياض`,
     canonical: siteUrl("/why-us/leadership"),
   })

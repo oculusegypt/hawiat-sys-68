@@ -1,6 +1,6 @@
 - [Hostinger archive SEO assets](hostinger-archive-seo-assets.md) — the release gate requires a stable PNG logo path even when the configured source logo is WebP.
 - [Hostinger archive schema](hostinger-archive-schema.md) — PHP bundle releases must copy a SQLite schema compatible with every field used by the PHP API.
-- [Archive-only SEO titles](hostinger-preserve-seo-overrides.md) — preservation builds must keep corrected titles consistent in prerendered HTML and the packaged database.
+- [Preview-release data parity](preview-release-data-parity.md) — release packages must mirror the current preview, never a stale database or archive-only content.
 - [Workspace content scripts](workspace-content-scripts.md) — standalone data scripts resolve shared dependencies and SQLite data from the workspace root.
 - [Selective SQLite sync](sqlite-selective-sync.md) — define excluded tables and dependent audit data explicitly before copying a live database.
 - [Identity release validation](identity-release-validation.md) — validate dynamic settings and static AI/PHP outputs together after business identity changes.
@@ -24,4 +24,4 @@
 - [Shared dispatch resources](shared-dispatch-resources.md) — service requests and work orders share drivers and vehicles, so assignments must check both schedules.
 - [Merged work-order identity](merged-work-order-identity.md) — service requests and work orders have independent ID spaces; qualify merged-list actions with record type.
 - [Production-like demo identity safety](demo-identity-safety.md) — unverified phones must not link or overwrite existing profiles; isolate tests and merge only after explicit review.
-- [Production-like database testing](production-like-db-testing.md) — run synthetic lifecycle and financial tests against an isolated SQLite copy, never the production-like source.
+- [Production-like database testing](production-like-db-testing.md) — use Replit secrets for real admin/driver login tests; keep synthetic business-data tests isolated.

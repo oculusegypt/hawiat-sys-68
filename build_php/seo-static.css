@@ -8,17 +8,6 @@ html.js #seo-static-page-content {
   display: none;
 }
 
-/* The homepage keeps its server-rendered snapshot visible until the live
-   settings request completes. Hide the React tree meanwhile to avoid a
-   duplicate first paint. */
-html.seo-static-pending #seo-static-page-content {
-  display: block;
-}
-
-html.seo-static-pending #root {
-  display: none;
-}
-
 html.no-js #seo-static-page-content {
   display: block;
 }
