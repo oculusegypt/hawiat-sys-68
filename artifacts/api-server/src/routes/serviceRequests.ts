@@ -79,7 +79,8 @@ function classifyContainerOperation(value: unknown): ContainerOperationType | nu
   if (emptying && pickup) return null;
   if (emptying) return "EMPTY_CONTAINER";
   if (pickup) return "PICKUP_CONTAINER";
-  return "DELIVER_CONTAINER";
+  if (/تسليم|توصيل|deliver|delivery|drop[\s-]?off/i.test(text)) return "DELIVER_CONTAINER";
+  return null;
 }
 
 function operationTypeForRequest(request: typeof serviceRequestsTable.$inferSelect): ContainerOperationType {
@@ -1009,6 +1010,9 @@ router.patch("/service-requests/:id", requireAdmin, requireSectionPermission("re
   if (adminRequest.adminRole === "driver") {
     return res.status(403).json({ error: "لا يملك السائق صلاحية تعديل الطلب مباشرة" });
   }
+  if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "driverStatus")) {
+    return res.status(422).json({ error: "حالة السائق لا تُعدّل من سجل الطلب؛ استخدم انتقال أمر العمل" });
+  }
   const id = parseInt(String(req.params.id), 10);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "رقم الطلب غير صحيح" });
   const {
@@ -1081,6 +1085,31 @@ router.patch("/service-requests/:id", requireAdmin, requireSectionPermission("re
     }
 
     const linkedOrder = linkedOrders[0];
+    if (status === "completed" && linkedOrder &&
+        String(parseContainerPayload(linkedOrder.payload).driverStatus ?? "unassigned") !== "completed") {
+      return {
+        error: "لا يمكن إكمال الطلب إداريًا قبل إكمال أمر العمل وإثباته من مسار السائق",
+        status: 409 as const,
+      };
+    }
+    if (status === "cancelled" || status === "rejected") {
+      const orderPayload = linkedOrder ? parseContainerPayload(linkedOrder.payload) : {};
+      const hasContainerCommitment =
+        Number(current.contractRecordId ?? orderPayload.contractRecordId ?? 0) > 0 ||
+        Number(current.containerRecordId ?? orderPayload.containerRecordId ?? 0) > 0;
+      const hasDispatchCommitment =
+        Number(current.assignedDriverId ?? orderPayload.assignedDriverId ?? 0) > 0 ||
+        Number(current.assignedVehicleId ?? orderPayload.assignedVehicleId ?? 0) > 0 ||
+        !["unassigned", "cancelled", "rejected"].includes(
+          String(orderPayload.driverStatus ?? current.driverStatus ?? "unassigned"),
+        );
+      if (hasContainerCommitment || hasDispatchCommitment) {
+        return {
+          error: "لا يمكن إلغاء طلب مرتبط بعقد أو أصل أو إسناد؛ أوقف المهمة وسوِّ الالتزامات عبر مسار الإلغاء الموثق",
+          status: 409 as const,
+        };
+      }
+    }
     if (linkedOrder) {
       const currentPayload = parseContainerPayload(linkedOrder.payload);
       const assigned = Number(currentPayload.assignedDriverId ?? 0) > 0 ||
@@ -1105,8 +1134,11 @@ router.patch("/service-requests/:id", requireAdmin, requireSectionPermission("re
       }
     }
 
+    const requestUpdateData: UpdateFields = status === "cancelled" || status === "rejected"
+      ? { ...updateData, driverStatus: status }
+      : updateData;
     const request = tx.update(serviceRequestsTable)
-      .set(updateData)
+      .set(requestUpdateData)
       .where(eq(serviceRequestsTable.id, id))
       .returning().get();
     if (!request) return { error: "Not found", status: 404 as const };
@@ -1126,7 +1158,7 @@ router.patch("/service-requests/:id", requireAdmin, requireSectionPermission("re
         ["notes", "notes"],
         ["appointmentType", "appointmentType"],
         ["scheduledAt", "scheduledAt"],
-        ["status", "status"],
+        ["driverStatus", "driverStatus"],
         ["adminNotes", "adminNotes"],
         ["customerRecordId", "customerRecordId"],
         ["containerRecordId", "containerRecordId"],
@@ -1135,6 +1167,9 @@ router.patch("/service-requests/:id", requireAdmin, requireSectionPermission("re
       for (const [sourceKey, payloadKey] of synchronizedFields) {
         const value = updateData[sourceKey];
         if (value !== undefined) nextPayload[payloadKey] = value;
+      }
+      if (status === "cancelled" || status === "rejected") {
+        nextPayload.status = status;
       }
       if (updateData.serviceType !== undefined || updateData.notes !== undefined) {
         const nextOperation = classifyContainerOperation(`${nextPayload.serviceType ?? ""} ${nextPayload.notes ?? ""}`);
@@ -1149,7 +1184,7 @@ router.patch("/service-requests/:id", requireAdmin, requireSectionPermission("re
       }
       const nextPayloadText = JSON.stringify(nextPayload);
       tx.update(containerSystemRecordsTable).set({
-        status: request.status,
+        status: status === "cancelled" || status === "rejected" ? request.status : linkedOrder.status,
         payload: nextPayloadText,
         updatedAt: request.updatedAt,
       }).where(eq(containerSystemRecordsTable.id, linkedOrder.id)).run();
@@ -1707,10 +1742,33 @@ router.patch("/driver/work-orders/:id", requireAdmin, requireDriver, async (req,
 
 router.delete("/service-requests/:id", requireAdmin, requireSectionPermission("requests", { adminOnly: true }), requireAdminOnly, async (req, res) => {
   const id = parseInt(String(req.params.id), 10);
-  const [deleted] = await db.delete(serviceRequestsTable)
-    .where(eq(serviceRequestsTable.id, id))
-    .returning();
-  if (!deleted) return res.status(404).json({ error: "Not found" });
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "رقم الطلب غير صحيح" });
+  const outcome = db.transaction((tx) => {
+    const current = tx.select().from(serviceRequestsTable).where(eq(serviceRequestsTable.id, id)).get();
+    if (!current) return { error: "Not found", status: 404 as const };
+    const linkedOrders = tx.select().from(containerSystemRecordsTable).all().filter((record) =>
+      record.kind === "work_order" &&
+      record.status !== "archived" &&
+      Number(parseContainerPayload(record.payload).legacyRequestId ?? 0) === id,
+    );
+    const hasLifecycleHistory =
+      linkedOrders.length > 0 ||
+      Number(current.contractRecordId ?? 0) > 0 ||
+      Number(current.containerRecordId ?? 0) > 0 ||
+      Number(current.assignedDriverId ?? 0) > 0 ||
+      Number(current.assignedVehicleId ?? 0) > 0 ||
+      !["pending"].includes(current.status) ||
+      !["unassigned"].includes(current.driverStatus);
+    if (hasLifecycleHistory) {
+      return {
+        error: "لا يمكن حذف طلب له ارتباط تشغيلي؛ احتفظ بسجله وألغِه من مسار الإلغاء المناسب",
+        status: 409 as const,
+      };
+    }
+    tx.delete(serviceRequestsTable).where(eq(serviceRequestsTable.id, id)).run();
+    return { deleted: true };
+  });
+  if ("error" in outcome) return res.status(Number(outcome.status ?? 500)).json({ error: outcome.error });
   return res.status(204).end();
 });
 

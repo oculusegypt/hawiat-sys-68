@@ -2964,6 +2964,22 @@ try {
     // 10b. Service Request Update: PATCH /api/service-requests/{id}
     if (preg_match('#^/service-requests/(\d+)$#', $path, $m) && $method === 'PATCH') {
         $id = (int)$m[1];
+        if (array_key_exists('status', $input)) hsEnsureCanonicalDispatchTasks($pdo);
+        $currentStmt = $pdo->prepare("SELECT * FROM service_requests WHERE id = :id LIMIT 1");
+        $currentStmt->execute([':id' => $id]);
+        $current = $currentStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$current) {
+            http_response_code(404);
+            echo json_encode(['error' => 'الطلب غير موجود'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $mutationIssue = hsServiceRequestMutationIssue($pdo, $current, $input);
+        if ($mutationIssue) {
+            http_response_code((int)$mutationIssue['status']);
+            echo json_encode(['error' => $mutationIssue['error']], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
         $fields = [];
         $params = [':id' => $id, ':now' => date('c')];
 
@@ -2979,8 +2995,7 @@ try {
             'appointmentType' => 'appointment_type',
             'scheduledAt' => 'scheduled_at',
             'status' => 'status',
-            'adminNotes' => 'admin_notes',
-            'driverStatus' => 'driver_status'
+            'adminNotes' => 'admin_notes'
         ];
 
         foreach ($mapping as $jsonKey => $dbCol) {
@@ -2989,12 +3004,67 @@ try {
                 $params[":{$jsonKey}"] = $input[$jsonKey];
             }
         }
+        $terminalRequestStatus = in_array((string)($input['status'] ?? ''), ['cancelled', 'rejected'], true);
+        if ($terminalRequestStatus) {
+            $fields[] = "driver_status = :terminalDriverStatus";
+            $params[':terminalDriverStatus'] = (string)$input['status'];
+        }
 
         if (!empty($fields)) {
             $fields[] = "updated_at = :now";
-            $sql = "UPDATE service_requests SET " . implode(', ', $fields) . " WHERE id = :id";
-            $stmt = $pdo->prepare($sql);
-            $stmt->execute($params);
+            $pdo->beginTransaction();
+            try {
+                $freshStmt = $pdo->prepare("SELECT * FROM service_requests WHERE id = :id LIMIT 1");
+                $freshStmt->execute([':id' => $id]);
+                $fresh = $freshStmt->fetch(PDO::FETCH_ASSOC);
+                if (!$fresh || (string)$fresh['updated_at'] !== (string)$current['updated_at']) {
+                    $pdo->rollBack();
+                    http_response_code($fresh ? 409 : 404);
+                    echo json_encode(['error' => $fresh ? 'تغير الطلب أثناء التعديل؛ أعد تحميله قبل الحفظ' : 'الطلب غير موجود'], JSON_UNESCAPED_UNICODE);
+                    exit;
+                }
+                $sql = "UPDATE service_requests SET " . implode(', ', $fields) . " WHERE id = :id";
+                $pdo->prepare($sql)->execute($params);
+
+                if (array_key_exists('status', $input) && (string)$input['status'] !== (string)$current['status']) {
+                    hsAudit(
+                        $pdo,
+                        $id,
+                        'service_request',
+                        'request_status_transition',
+                        json_encode(['status' => $current['status']], JSON_UNESCAPED_UNICODE),
+                        json_encode(['status' => $input['status'], 'adminNotes' => $input['adminNotes'] ?? $current['admin_notes'] ?? ''], JSON_UNESCAPED_UNICODE),
+                        (int)($admin['id'] ?? 0)
+                    );
+                }
+
+                if ($terminalRequestStatus) {
+                    $linkedStmt = $pdo->prepare("SELECT * FROM container_system_records
+                        WHERE kind='work_order' AND status<>'archived'
+                        AND json_extract(payload, '$.legacyRequestId') = :id");
+                    $linkedStmt->execute([':id' => $id]);
+                    $linkedOrder = $linkedStmt->fetch(PDO::FETCH_ASSOC);
+                    if ($linkedOrder) {
+                        $beforePayload = (string)$linkedOrder['payload'];
+                        $nextPayload = hsPayload($beforePayload);
+                        $nextPayload['status'] = (string)$input['status'];
+                        $nextPayload['driverStatus'] = (string)$input['status'];
+                        $nextJson = json_encode($nextPayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                        $pdo->prepare("UPDATE container_system_records SET status=:status,payload=:payload,updated_at=:now WHERE id=:id")
+                            ->execute([
+                                ':status' => (string)$input['status'],
+                                ':payload' => $nextJson,
+                                ':now' => date('c'),
+                                ':id' => (int)$linkedOrder['id'],
+                            ]);
+                        hsAudit($pdo, (int)$linkedOrder['id'], 'work_order', 'legacy_request_admin_update', $beforePayload, $nextJson, (int)($admin['id'] ?? 0));
+                    }
+                }
+                $pdo->commit();
+            } catch (Throwable $error) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                throw $error;
+            }
         }
 
         $stmt = $pdo->prepare("SELECT * FROM service_requests WHERE id = :id LIMIT 1");
@@ -3230,6 +3300,30 @@ try {
     // 10d. Service Request Delete: DELETE /api/service-requests/{id}
     if (preg_match('#^/service-requests/(\d+)$#', $path, $m) && $method === 'DELETE') {
         $id = (int)$m[1];
+        $requestStmt = $pdo->prepare("SELECT * FROM service_requests WHERE id = :id LIMIT 1");
+        $requestStmt->execute([':id' => $id]);
+        $request = $requestStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$request) {
+            http_response_code(404);
+            echo json_encode(['error' => 'الطلب غير موجود'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $linkedStmt = $pdo->prepare("SELECT id FROM container_system_records
+            WHERE kind='work_order' AND status<>'archived'
+            AND json_extract(payload, '$.legacyRequestId') = :id LIMIT 1");
+        $linkedStmt->execute([':id' => $id]);
+        $hasLifecycleHistory = (bool)$linkedStmt->fetchColumn()
+            || (int)($request['contract_record_id'] ?? 0) > 0
+            || (int)($request['container_record_id'] ?? 0) > 0
+            || (int)($request['assigned_driver_id'] ?? 0) > 0
+            || (int)($request['assigned_vehicle_id'] ?? 0) > 0
+            || (string)($request['status'] ?? 'pending') !== 'pending'
+            || (string)($request['driver_status'] ?? 'unassigned') !== 'unassigned';
+        if ($hasLifecycleHistory) {
+            http_response_code(409);
+            echo json_encode(['error' => 'لا يمكن حذف طلب له ارتباط تشغيلي؛ احتفظ بسجله وألغِه من مسار الإلغاء المناسب'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
         $stmt = $pdo->prepare("DELETE FROM service_requests WHERE id = :id");
         $stmt->execute([':id' => $id]);
         echo json_encode(['success' => true, 'id' => $id], JSON_UNESCAPED_UNICODE);

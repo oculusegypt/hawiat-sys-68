@@ -47,6 +47,10 @@ $containerId = $insertRecord('container_asset', 'available', 'TEST-ONLY-ASSET-1'
     'status' => 'available',
     'location' => 'TEST ONLY — warehouse',
 ]);
+$assetRow = $pdo->query("SELECT * FROM container_system_records WHERE id = {$containerId}")->fetch(PDO::FETCH_ASSOC);
+$assetStatusIssue = hsProtectedRecordMutationIssue($assetRow, ['status' => 'rented']);
+lifecycleExpectSame(409, (int)($assetStatusIssue['status'] ?? 0),
+    'asset status must not be changed without an operational movement');
 $contractId = $insertRecord('contract', 'active', 'TEST-ONLY-CONTRACT-1', [
     'contractNumber' => 'TEST-ONLY-CONTRACT-1',
     'containerRecordId' => $containerId,
@@ -54,11 +58,25 @@ $contractId = $insertRecord('contract', 'active', 'TEST-ONLY-CONTRACT-1', [
     'total' => 100,
     'location' => 'TEST ONLY — customer site',
 ]);
+$contractRow = $pdo->query("SELECT * FROM container_system_records WHERE id = {$contractId}")->fetch(PDO::FETCH_ASSOC);
+$contractStatusIssue = hsProtectedRecordMutationIssue($contractRow, ['status' => 'returned']);
+lifecycleExpectSame(409, (int)($contractStatusIssue['status'] ?? 0),
+    'contract status must use the lifecycle action that records its movement');
+$contractPayloadStatusIssue = hsProtectedRecordMutationIssue($contractRow, ['payload' => ['status' => 'returned']]);
+lifecycleExpectSame(409, (int)($contractPayloadStatusIssue['status'] ?? 0),
+    'contract payload status must not bypass the lifecycle action');
 $pdo->prepare("INSERT INTO service_requests
     (client_name, phone, service_type, location, created_at, updated_at, status, container_record_id, contract_record_id, driver_status)
     VALUES ('TEST ONLY — lifecycle fixture', 'TEST ONLY', 'تسليم حاوية', 'TEST ONLY', ?, ?, 'pending', ?, ?, 'assigned')")
     ->execute([date('c'), date('c'), $containerId, $contractId]);
 $requestId = (int)$pdo->lastInsertId();
+$requestRow = $pdo->query("SELECT * FROM service_requests WHERE id = {$requestId}")->fetch(PDO::FETCH_ASSOC);
+$cancelIssue = hsServiceRequestMutationIssue($pdo, $requestRow, ['status' => 'cancelled']);
+lifecycleExpectSame(409, (int)($cancelIssue['status'] ?? 0),
+    'a contract-linked request must not be cancelled through the generic status route');
+$driverStatusIssue = hsServiceRequestMutationIssue($pdo, $requestRow, ['driverStatus' => 'completed']);
+lifecycleExpectSame(422, (int)($driverStatusIssue['status'] ?? 0),
+    'driver status must not be changed through the generic request route');
 $lineId = $insertRecord('contract_line', 'active', 'TEST-ONLY-LINE-1', [
     'contractRecordId' => $contractId,
     'status' => 'active',
@@ -79,12 +97,39 @@ lifecycleExpectSame('active', (string)$pdo->query("SELECT status FROM container_
 lifecycleExpectSame(0, (int)$pdo->query("SELECT COUNT(*) FROM container_system_records WHERE kind = 'container_movement'")->fetchColumn(),
     'a blocked delivery must not create a movement');
 
+$workOrderPayload = [
+    'legacyRequestId' => $requestId,
+    'contractRecordId' => $contractId,
+    'containerRecordId' => $containerId,
+    'assignedDriverId' => 1,
+    'driverStatus' => 'assigned',
+    'status' => 'assigned',
+];
+$workOrderId = $insertRecord('work_order', 'assigned', 'TEST-ONLY-WORK-ORDER-1', $workOrderPayload);
+$completionIssue = hsServiceRequestMutationIssue($pdo, $requestRow, ['status' => 'completed']);
+lifecycleExpectSame(409, (int)($completionIssue['status'] ?? 0),
+    'generic request completion must not bypass an open work order');
 $pdo->prepare("UPDATE service_requests SET status = 'completed', driver_status = 'completed' WHERE id = ?")->execute([$requestId]);
+$pdo->prepare("UPDATE container_system_records SET status = 'completed', payload = ? WHERE id = ?")->execute([
+    json_encode(array_merge($workOrderPayload, [
+        'status' => 'completed',
+        'driverStatus' => 'completed',
+        'driverProofPhotoUrl' => '/uploads/TEST-ONLY-lifecycle-proof.webp',
+        'driverSignatureData' => 'TEST ONLY — lifecycle signature',
+        'driverReceiverName' => 'TEST ONLY — lifecycle receiver',
+    ]), JSON_UNESCAPED_UNICODE),
+    $workOrderId,
+]);
 $delivery = hsUpdateContainerContractLifecycle($pdo, $contractId, 'deliver', 'TEST ONLY — delivery location', 1, $manager);
 lifecycleExpectSame('delivered', (string)$delivery['contract']['status'], 'delivery must advance the contract');
 lifecycleExpectSame('rented', (string)$pdo->query("SELECT status FROM container_system_records WHERE id = {$containerId}")->fetchColumn(),
     'delivery must mark the asset as rented');
 lifecycleExpectSame('deliver', (string)hsPayload($delivery['movement']['payload'])['movementType'], 'delivery must write its movement');
+$contractRow = $pdo->query("SELECT * FROM container_system_records WHERE id = {$contractId}")->fetch(PDO::FETCH_ASSOC);
+$changedContractPayload = hsPayload($contractRow['payload']);
+$changedContractPayload['total'] = 125;
+lifecycleExpectSame(true, hsContractPatchRequiresAmendment($pdo, $contractRow, $changedContractPayload),
+    'contract terms must not change after an operational movement');
 
 $return = hsUpdateContainerContractLifecycle($pdo, $contractId, 'return', '', 1, $manager);
 lifecycleExpectSame('returned', (string)$return['contract']['status'], 'return must advance the contract');

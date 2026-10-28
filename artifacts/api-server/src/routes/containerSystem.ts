@@ -61,6 +61,61 @@ function parsePayload(payload: unknown): Record<string, unknown> {
   }
 }
 
+const contractTermsFields = [
+  "amount", "total", "subtotal", "taxAmount", "taxRate", "taxEnabled", "currency",
+  "contractNumber", "customerRecordId", "customerName", "siteRecordId", "location", "address",
+  "containerRecordId", "assignedContainerRecordId", "containerCode", "startDate", "endDate",
+  "duration", "billingFrequency", "serviceType", "terms", "contractTerms",
+] as const;
+
+function recordReferencesContract(payload: Record<string, unknown>, contractId: number, contractNumber: string) {
+  const directId = Number(payload.contractRecordId ?? payload.contractId ?? 0);
+  if (directId === contractId) return true;
+  if (contractNumber && String(payload.contractNumber ?? "").trim() === contractNumber) return true;
+  return Array.isArray(payload.allocations) && payload.allocations.some((allocation) =>
+    allocation && typeof allocation === "object" &&
+    Number((allocation as Record<string, unknown>).contractId ?? 0) === contractId,
+  );
+}
+
+function contractPatchRequiresAmendment(
+  contract: typeof containerSystemRecordsTable.$inferSelect,
+  nextPayload: Record<string, unknown>,
+  records: typeof containerSystemRecordsTable.$inferSelect[],
+) {
+  const before = parsePayload(contract.payload);
+  const termsChanged = contractTermsFields.some((field) =>
+    JSON.stringify(before[field]) !== JSON.stringify(nextPayload[field]),
+  );
+  if (!termsChanged) return false;
+
+  const contractPayload = before;
+  const contractNumber = String(contractPayload.contractNumber ?? contract.reference ?? "").trim();
+  const references = (record: typeof containerSystemRecordsTable.$inferSelect) =>
+    recordReferencesContract(parsePayload(record.payload), contract.id, contractNumber);
+  const lifecycleAdvanced = ["delivered", "returned", "closed"].includes(contract.status) ||
+    records.some((record) => {
+      if (!references(record)) return false;
+      if (record.kind === "container_movement") return true;
+      if (record.kind !== "work_order") return false;
+      const payload = parsePayload(record.payload);
+      return Number(payload.assignedDriverId ?? 0) > 0 ||
+        Number(payload.assignedVehicleId ?? 0) > 0 ||
+        ["accepted", "started", "in_progress", "en_route", "arrived", "completed"].includes(
+          String(payload.driverStatus ?? ""),
+        );
+    });
+  const financialPosted = records.some((record) => {
+    if (!references(record)) return false;
+    if (["payment", "receipt", "payment_return", "invoice_return"].includes(record.kind)) {
+      return record.status === "posted";
+    }
+    return record.kind === "invoice" &&
+      ["posted", "partially_paid", "paid", "settled"].includes(record.status);
+  });
+  return lifecycleAdvanced || financialPosted;
+}
+
 const CONTAINER_CATEGORY_LABELS: Record<string, string> = {
   debris: "حاويات الأنقاض ومخلفات البناء",
   waste: "حاويات النفايات والمكابس",
@@ -941,27 +996,6 @@ function findOpenContainerOperation(
     assignedDriverId: Number(payload.assignedDriverId ?? 0) || null,
     assignedVehicleId: Number(payload.assignedVehicleId ?? 0) || null,
   };
-}
-
-async function syncMovement(payload: Record<string, unknown>, actorId: number | null) {
-  const movementType = String(payload.movementType ?? "").toLowerCase();
-  const nextStatus = movementStatus(movementType);
-  if (!nextStatus) throw new Error("نوع حركة الحاوية غير مدعوم");
-  const asset = await findAssetByCode(String(payload.containerCode ?? ""));
-  if (!asset) throw new Error("الحاوية المرتبطة بالحركة غير موجودة");
-  if (!movementTransitionAllowed(asset.status, movementType)) {
-    throw new Error(`لا يمكن تنفيذ حركة ${String(payload.movementType)} على حاوية حالتها الحالية ${asset.status}`);
-  }
-  const before = asset.payload;
-  const beforePayload = parsePayload(before);
-  const nextPayload = { ...beforePayload, location: payload.location ?? beforePayload.location };
-  await db.update(containerSystemRecordsTable).set({
-    status: nextStatus, payload: JSON.stringify(nextPayload), updatedAt: new Date().toISOString(),
-  }).where(eq(containerSystemRecordsTable.id, asset.id));
-  await db.insert(containerSystemAuditTable).values({
-    recordId: asset.id, kind: asset.kind, action: "movement_sync",
-    beforePayload: before, afterPayload: JSON.stringify(nextPayload), actorId,
-  });
 }
 
 async function linkContractToRequest(payload: Record<string, unknown>, contractId: number, actorId: number | null) {
@@ -2775,6 +2809,34 @@ router.post("/admin/container-system/records", async (req, res) => {
           beforePayload: contract.payload, afterPayload: JSON.stringify(nextContractPayload), actorId: adminReq.adminId,
         }).run();
       }
+      if (kind === "container_movement") {
+        const movementType = String(payload.movementType ?? "").toLowerCase();
+        const movementNextStatus = movementStatus(movementType);
+        const movementAsset = tx.select().from(containerSystemRecordsTable).all().find(record =>
+          ["container", "container_asset"].includes(record.kind) &&
+          record.status !== "archived" &&
+          assetCodeOf(parsePayload(record.payload)) === String(payload.containerCode ?? "").trim(),
+        );
+        if (!movementNextStatus || !movementAsset) throw new Error("الحاوية المرتبطة بالحركة غير موجودة أو نوع الحركة غير مدعوم");
+        if (!movementTransitionAllowed(movementAsset.status, movementType)) {
+          throw new Error(`لا يمكن تنفيذ حركة ${String(payload.movementType)} على حاوية حالتها الحالية ${movementAsset.status}`);
+        }
+        const beforePayload = parsePayload(movementAsset.payload);
+        const nextAssetPayload = { ...beforePayload, location: payload.location ?? beforePayload.location };
+        tx.update(containerSystemRecordsTable).set({
+          status: movementNextStatus,
+          payload: JSON.stringify(nextAssetPayload),
+          updatedAt: new Date().toISOString(),
+        }).where(eq(containerSystemRecordsTable.id, movementAsset.id)).run();
+        tx.insert(containerSystemAuditTable).values({
+          recordId: movementAsset.id,
+          kind: movementAsset.kind,
+          action: "movement_sync",
+          beforePayload: movementAsset.payload,
+          afterPayload: JSON.stringify(nextAssetPayload),
+          actorId: adminReq.adminId,
+        }).run();
+      }
       tx.insert(containerSystemAuditTable).values({
         recordId: current.id, kind, action: "create", afterPayload: current.payload, actorId: adminReq.adminId,
       }).run();
@@ -2783,14 +2845,6 @@ router.post("/admin/container-system/records", async (req, res) => {
   } catch (error) {
     return res.status(422).json({ error: "تعذر حفظ التخصيص بشكل كامل" });
   }
-   if (kind === "container_movement") {
-     try {
-       await syncMovement(payload, adminReq.adminId);
-     } catch (error) {
-       await db.update(containerSystemRecordsTable).set({ status: "archived", updatedAt: new Date().toISOString() }).where(eq(containerSystemRecordsTable.id, created.id));
-       return res.status(422).json({ error: "تعذر مزامنة حركة الحاوية" });
-     }
-   }
   if (kind === "contract") {
     try {
       await linkContractToRequest(payload, created.id, adminReq.adminId);
@@ -2872,12 +2926,40 @@ router.patch("/admin/container-system/records/:id", async (req, res) => {
     return res.status(409).json({ error: "قيد الأستاذ لا يُعدّل مباشرة؛ صحح المستند المالي الأصلي بحركة عكسية موثقة" });
   }
   const body = req.body as { status?: string; payload?: Record<string, unknown> };
+  if (["container", "container_asset"].includes(current.kind)) {
+    const currentAssetStatus = canonicalAssetStatus(current.status, current.status);
+    const requestedRowStatus = body.status === undefined
+      ? currentAssetStatus
+      : canonicalAssetStatus(body.status, currentAssetStatus);
+    const requestedPayloadStatus = body.payload?.status === undefined
+      ? currentAssetStatus
+      : canonicalAssetStatus(body.payload.status, currentAssetStatus);
+    if (requestedRowStatus !== currentAssetStatus || requestedPayloadStatus !== currentAssetStatus) {
+      return res.status(409).json({ error: "حالة الأصل لا تتغير مباشرة؛ سجّل حركة أو تخصيصًا موثقًا" });
+    }
+  }
+  if (current.kind === "contract" && body.status !== undefined && body.status !== current.status) {
+    return res.status(409).json({ error: "لا تغيّر حالة العقد مباشرة؛ استخدم إجراء دورة العقد المسجل بالحركة" });
+  }
   const nextPayload = body.payload ? { ...parsePayload(current.payload), ...body.payload } : parsePayload(current.payload);
+  if (["container", "container_asset"].includes(current.kind)) {
+    nextPayload.status = canonicalAssetStatus(current.status, current.status);
+  }
+  if (current.kind === "contract" && body.payload?.status !== undefined &&
+      String(body.payload.status) !== String(parsePayload(current.payload).status ?? current.status)) {
+    return res.status(409).json({ error: "لا تغيّر حالة العقد داخل بياناته مباشرة؛ استخدم إجراء دورة العقد المسجل بالحركة" });
+  }
   try {
     await normalizeCategoryReferences(current.kind, nextPayload);
     if (current.kind === "contract_line") await normalizeContractLinePayload(nextPayload, id);
   } catch (error) {
     return res.status(422).json({ error: error instanceof Error ? error.message : "بيانات التصنيف المركزي غير صحيحة" });
+  }
+  if (current.kind === "contract" &&
+      contractPatchRequiresAmendment(current, nextPayload, await db.select().from(containerSystemRecordsTable))) {
+    return res.status(409).json({
+      error: "بدأ تنفيذ العقد أو سُجلت عليه حركة مالية؛ لا تعدّل شروطه مباشرة، ويلزم مسار تعديل تعاقدي موثق",
+    });
   }
   try {
     validateFinancialLifecycle(
@@ -2945,13 +3027,29 @@ router.patch("/admin/container-system/records/:id", async (req, res) => {
   const nextStatus = current.kind === "container" || current.kind === "container_asset"
     ? canonicalAssetStatus(nextPayload.status, String(body.status ?? current.status))
     : body.status ?? current.status;
-  const updated = db.transaction((tx) => {
+  const updateOutcome = db.transaction((tx) => {
+    const fresh = tx.select().from(containerSystemRecordsTable).where(eq(containerSystemRecordsTable.id, id)).get();
+    if (!fresh) return { error: "السجل غير موجود", status: 404 as const };
+    if (fresh.updatedAt !== current.updatedAt) {
+      return { error: "تغير السجل أثناء التعديل؛ أعد تحميله قبل الحفظ", status: 409 as const };
+    }
+    if (fresh.kind === "contract") {
+      if (body.status !== undefined && body.status !== fresh.status) {
+        return { error: "لا تغيّر حالة العقد مباشرة؛ استخدم إجراء دورة العقد المسجل بالحركة", status: 409 as const };
+      }
+      if (contractPatchRequiresAmendment(fresh, nextPayload, tx.select().from(containerSystemRecordsTable).all())) {
+        return {
+          error: "بدأ تنفيذ العقد أو سُجلت عليه حركة مالية؛ لا تعدّل شروطه مباشرة، ويلزم مسار تعديل تعاقدي موثق",
+          status: 409 as const,
+        };
+      }
+    }
     const next = tx.update(containerSystemRecordsTable).set({
       status: nextStatus,
       payload: JSON.stringify(nextPayload),
       updatedAt: new Date().toISOString(),
     }).where(eq(containerSystemRecordsTable.id, id)).returning().get();
-    if (!next) throw new Error("تعذر تحديث المستند المالي");
+    if (!next) return { error: "تعذر تحديث المستند المالي", status: 409 as const };
     tx.insert(containerSystemAuditTable).values({
       recordId: id, kind: current.kind, action: "update", beforePayload: current.payload,
       afterPayload: next.payload, actorId: adminReq.adminId,
@@ -3057,8 +3155,12 @@ router.patch("/admin/container-system/records/:id", async (req, res) => {
         throw new Error(error instanceof Error ? error.message : "تعذر ترحيل الحركة إلى النواة المالية");
       }
     }
-    return next;
+    return { updated: next };
   });
+  if ("error" in updateOutcome) {
+    return res.status(Number(updateOutcome.status ?? 500)).json({ error: updateOutcome.error });
+  }
+  const updated = updateOutcome.updated;
   if (financialLifecycleKinds.has(current.kind) && current.status === "posted" && nextStatus === "cancelled") {
     const amount = financialAmountForRecord(current.kind, nextPayload);
     if (amount > 0) {
@@ -3071,7 +3173,6 @@ router.patch("/admin/container-system/records/:id", async (req, res) => {
       }, String(nextPayload.reason ?? nextPayload.cancellationReason ?? "إلغاء حركة مالية مرحّلة"), adminReq.adminId);
     }
   }
-  if (current.kind === "container_movement") await syncMovement(nextPayload, adminReq.adminId);
   if (current.kind === "contract" && nextPayload.requestId) {
     try {
       await linkContractToRequest(nextPayload, id, adminReq.adminId);

@@ -23,6 +23,142 @@ function hsPayload($value): array {
     return is_array($decoded) ? $decoded : [];
 }
 
+function hsContractPatchRequiresAmendment(PDO $pdo, array $contract, array $nextPayload): bool {
+    $before = hsPayload($contract['payload'] ?? null);
+    $termFields = [
+        'amount', 'total', 'subtotal', 'taxAmount', 'taxRate', 'taxEnabled', 'currency',
+        'contractNumber', 'customerRecordId', 'customerName', 'siteRecordId', 'location', 'address',
+        'containerRecordId', 'assignedContainerRecordId', 'containerCode', 'startDate', 'endDate',
+        'duration', 'billingFrequency', 'serviceType', 'terms', 'contractTerms',
+    ];
+    $termsChanged = false;
+    foreach ($termFields as $field) {
+        if (json_encode($before[$field] ?? null) !== json_encode($nextPayload[$field] ?? null)) {
+            $termsChanged = true;
+            break;
+        }
+    }
+    if (!$termsChanged) return false;
+
+    $contractId = (int)$contract['id'];
+    $contractNumber = trim((string)($before['contractNumber'] ?? $contract['reference'] ?? ''));
+    $referencesContract = static function(array $payload) use ($contractId, $contractNumber): bool {
+        if ((int)($payload['contractRecordId'] ?? $payload['contractId'] ?? 0) === $contractId) return true;
+        if ($contractNumber !== '' && trim((string)($payload['contractNumber'] ?? '')) === $contractNumber) return true;
+        foreach (($payload['allocations'] ?? []) as $allocation) {
+            if (is_array($allocation) && (int)($allocation['contractId'] ?? 0) === $contractId) return true;
+        }
+        return false;
+    };
+    $lifecycleAdvanced = in_array((string)$contract['status'], ['delivered', 'returned', 'closed'], true);
+    $financialPosted = false;
+    foreach ($pdo->query("SELECT kind,status,payload FROM container_system_records")->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $payload = hsPayload($row['payload'] ?? null);
+        if (!$referencesContract($payload)) continue;
+        if (($row['kind'] ?? '') === 'container_movement') $lifecycleAdvanced = true;
+        if (($row['kind'] ?? '') === 'work_order'
+            && ((int)($payload['assignedDriverId'] ?? 0) > 0
+                || (int)($payload['assignedVehicleId'] ?? 0) > 0
+                || in_array((string)($payload['driverStatus'] ?? ''), ['accepted', 'started', 'in_progress', 'en_route', 'arrived', 'completed'], true))) {
+            $lifecycleAdvanced = true;
+        }
+        if (in_array((string)($row['kind'] ?? ''), ['payment', 'receipt', 'payment_return', 'invoice_return'], true)
+            && ($row['status'] ?? '') === 'posted') {
+            $financialPosted = true;
+        }
+        if (($row['kind'] ?? '') === 'invoice'
+            && in_array((string)($row['status'] ?? ''), ['posted', 'partially_paid', 'paid', 'settled'], true)) {
+            $financialPosted = true;
+        }
+    }
+    return $lifecycleAdvanced || $financialPosted;
+}
+
+function hsProtectedRecordMutationIssue(array $current, array $input): ?array {
+    $kind = (string)($current['kind'] ?? '');
+    if (in_array($kind, ['container', 'container_asset'], true)) {
+        $currentStatus = hsCanonicalAssetStatus((string)($current['status'] ?? ''), (string)($current['status'] ?? ''));
+        $rowStatus = array_key_exists('status', $input)
+            ? hsCanonicalAssetStatus((string)$input['status'], $currentStatus)
+            : $currentStatus;
+        $payload = is_array($input['payload'] ?? null) ? $input['payload'] : [];
+        $payloadStatus = array_key_exists('status', $payload)
+            ? hsCanonicalAssetStatus((string)$payload['status'], $currentStatus)
+            : $currentStatus;
+        if ($rowStatus !== $currentStatus || $payloadStatus !== $currentStatus) {
+            return ['status' => 409, 'error' => 'حالة الأصل لا تتغير مباشرة؛ سجّل حركة أو تخصيصًا موثقًا'];
+        }
+    }
+    if ($kind === 'contract') {
+        if (array_key_exists('status', $input) && (string)$input['status'] !== (string)($current['status'] ?? '')) {
+            return ['status' => 409, 'error' => 'لا تغيّر حالة العقد مباشرة؛ استخدم إجراء دورة العقد المسجل بالحركة'];
+        }
+        $currentPayload = hsPayload($current['payload'] ?? null);
+        $nextPayload = is_array($input['payload'] ?? null) ? $input['payload'] : [];
+        if (array_key_exists('status', $nextPayload)
+            && (string)$nextPayload['status'] !== (string)($currentPayload['status'] ?? $current['status'] ?? '')) {
+            return ['status' => 409, 'error' => 'لا تغيّر حالة العقد داخل بياناته مباشرة؛ استخدم إجراء دورة العقد المسجل بالحركة'];
+        }
+    }
+    return null;
+}
+
+function hsServiceRequestMutationIssue(PDO $pdo, array $request, array $input): ?array {
+    if (array_key_exists('driverStatus', $input)) {
+        return ['status' => 422, 'error' => 'حالة السائق لا تُعدّل من سجل الطلب؛ استخدم انتقال أمر العمل'];
+    }
+    if (!array_key_exists('status', $input)) return null;
+
+    $currentStatus = (string)($request['status'] ?? 'pending');
+    $nextStatus = (string)$input['status'];
+    $transitions = [
+        'pending' => ['pending', 'in_progress', 'cancelled', 'rejected'],
+        'in_progress' => ['in_progress', 'completed', 'cancelled', 'rejected'],
+        'completed' => ['completed'],
+        'cancelled' => ['cancelled'],
+        'rejected' => ['rejected'],
+    ];
+    if (!array_key_exists($nextStatus, $transitions)) {
+        return ['status' => 422, 'error' => 'حالة الطلب غير مدعومة'];
+    }
+    if (!in_array($nextStatus, $transitions[$currentStatus] ?? [], true)) {
+        return ['status' => 409, 'error' => 'لا يمكن نقل الطلب من ' . $currentStatus . ' إلى ' . $nextStatus];
+    }
+
+    $hasContainerCommitment = (int)($request['contract_record_id'] ?? 0) > 0
+        || (int)($request['container_record_id'] ?? 0) > 0;
+    $hasDispatchCommitment = (int)($request['assigned_driver_id'] ?? 0) > 0
+        || (int)($request['assigned_vehicle_id'] ?? 0) > 0
+        || !in_array((string)($request['driver_status'] ?? 'unassigned'), ['unassigned', 'cancelled', 'rejected'], true);
+    $linked = $pdo->prepare("SELECT payload FROM container_system_records WHERE kind='work_order' AND status<>'archived' AND json_extract(payload, '$.legacyRequestId') = :id");
+    $linked->execute([':id' => (int)$request['id']]);
+    $linkedOrders = $linked->fetchAll(PDO::FETCH_ASSOC);
+    if (count($linkedOrders) > 1) {
+        return ['status' => 409, 'error' => 'طلب الخدمة مرتبط بأكثر من مهمة؛ يلزم حسم التعارض قبل تعديل الحالة'];
+    }
+    foreach ($linkedOrders as $row) {
+        $payload = hsPayload($row['payload'] ?? null);
+        if (!empty($payload['reconciliationRequired'])) {
+            return ['status' => 409, 'error' => 'طلب الخدمة مرتبط بمهمة تحتاج إلى مراجعة الإدارة قبل تعديل الحالة'];
+        }
+        if ($nextStatus === 'completed' && (string)($payload['driverStatus'] ?? 'unassigned') !== 'completed') {
+            return ['status' => 409, 'error' => 'لا يمكن إكمال الطلب إداريًا قبل إكمال أمر العمل وإثباته من مسار السائق'];
+        }
+        $hasContainerCommitment = $hasContainerCommitment
+            || (int)($payload['contractRecordId'] ?? 0) > 0
+            || (int)($payload['containerRecordId'] ?? 0) > 0;
+        $hasDispatchCommitment = $hasDispatchCommitment
+            || (int)($payload['assignedDriverId'] ?? 0) > 0
+            || (int)($payload['assignedVehicleId'] ?? 0) > 0
+            || !in_array((string)($payload['driverStatus'] ?? 'unassigned'), ['unassigned', 'cancelled', 'rejected'], true);
+    }
+    if (!in_array($nextStatus, ['cancelled', 'rejected'], true)) return null;
+    if ($hasContainerCommitment || $hasDispatchCommitment) {
+        return ['status' => 409, 'error' => 'لا يمكن إلغاء طلب مرتبط بعقد أو أصل أو إسناد؛ أوقف المهمة وسوِّ الالتزامات عبر مسار الإلغاء الموثق'];
+    }
+    return null;
+}
+
 function hsRecord(array $row): array {
     $row['id'] = (int)$row['id'];
     $row['createdBy'] = isset($row['created_by']) ? (int)$row['created_by'] : null;
@@ -1996,9 +2132,20 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         if ($method === 'PATCH') {
             if ($current['kind'] === 'container_movement') hsJson(['error' => 'حركة التشغيل لا تُعدّل بعد تسجيلها'], 409);
             if ($current['kind'] === 'ledger_entry') hsJson(['error' => 'قيد الأستاذ لا يُعدّل مباشرة؛ صحح المستند المالي الأصلي بحركة عكسية موثقة'], 409);
+            $mutationIssue = hsProtectedRecordMutationIssue($current, $input);
+            if ($mutationIssue) hsJson(['error' => $mutationIssue['error']], (int)$mutationIssue['status']);
+            if (in_array((string)$current['kind'], ['container', 'container_asset'], true)) {
+                $currentAssetStatus = hsCanonicalAssetStatus((string)$current['status'], (string)$current['status']);
+            }
             $payload = array_merge(hsPayload($current['payload']), is_array($input['payload'] ?? null) ? $input['payload'] : []);
+            if (in_array((string)$current['kind'], ['container', 'container_asset'], true)) {
+                $payload['status'] = hsCanonicalAssetStatus((string)$current['status'], (string)$current['status']);
+            }
             $payload = hsNormalizeFinancial((string)$current['kind'], $payload);
             $nextStatus = (string)($input['status'] ?? $current['status']);
+            if ($current['kind'] === 'contract' && hsContractPatchRequiresAmendment($pdo, $current, $payload)) {
+                hsJson(['error' => 'بدأ تنفيذ العقد أو سُجلت عليه حركة مالية؛ لا تعدّل شروطه مباشرة، ويلزم مسار تعديل تعاقدي موثق'], 409);
+            }
             hsValidateFinancialLifecycle($admin, (string)$current['kind'], (string)$current['status'], $nextStatus, $payload);
             if (in_array((string)$current['kind'], hsFinancialLifecycleKinds(), true)
                 && in_array((string)$current['status'], ['approved', 'posted', 'cancelled'], true)
@@ -2019,6 +2166,23 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             if (in_array($current['kind'], ['container', 'container_asset'], true)) $nextStatus = hsCanonicalAssetStatus((string)($payload['status'] ?? ''), $nextStatus);
             $pdo->beginTransaction();
             try {
+                $freshStmt = $pdo->prepare("SELECT * FROM container_system_records WHERE id = :id LIMIT 1");
+                $freshStmt->execute([':id' => $id]);
+                $fresh = $freshStmt->fetch(PDO::FETCH_ASSOC);
+                if (!$fresh || (string)($fresh['updated_at'] ?? '') !== (string)($current['updated_at'] ?? '')) {
+                    $pdo->rollBack();
+                    hsJson(['error' => 'تغير السجل أثناء التعديل؛ أعد تحميله قبل الحفظ'], $fresh ? 409 : 404);
+                }
+                if ($fresh['kind'] === 'contract') {
+                    if ($nextStatus !== (string)$fresh['status']) {
+                        $pdo->rollBack();
+                        hsJson(['error' => 'لا تغيّر حالة العقد مباشرة؛ استخدم إجراء دورة العقد المسجل بالحركة'], 409);
+                    }
+                    if (hsContractPatchRequiresAmendment($pdo, $fresh, $payload)) {
+                        $pdo->rollBack();
+                        hsJson(['error' => 'بدأ تنفيذ العقد أو سُجلت عليه حركة مالية؛ لا تعدّل شروطه مباشرة، ويلزم مسار تعديل تعاقدي موثق'], 409);
+                    }
+                }
                 $now = date('c');
                 $pdo->prepare("UPDATE container_system_records SET status = :status, payload = :payload, updated_at = :updated_at WHERE id = :id")->execute([
                     ':status' => $nextStatus, ':payload' => json_encode($payload, JSON_UNESCAPED_UNICODE), ':updated_at' => $now, ':id' => $id,

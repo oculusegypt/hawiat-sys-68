@@ -1013,6 +1013,22 @@ async function main() {
     assert.ok(intakeBody.customerRecordId);
     assert.notEqual(intakeBody.customerRecordId, customer.id,
       "an unverified public phone must not claim an existing customer profile");
+    const safeRequestCancellation = await fetch(`http://127.0.0.1:${port}/api/service-requests/${intakeBody.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ status: "cancelled" }),
+    });
+    assert.equal(safeRequestCancellation.status, 200, await safeRequestCancellation.clone().text());
+    const cancelledRequest = db.select().from(serviceRequestsTable)
+      .where(eq(serviceRequestsTable.id, intakeBody.id)).get();
+    assert.equal(cancelledRequest?.status, "cancelled");
+    assert.equal(cancelledRequest?.driverStatus, "cancelled");
+    const cancelledRequestWorkOrder = db.select().from(containerSystemRecordsTable).all().find((record) =>
+      record.kind === "work_order" &&
+      Number((JSON.parse(record.payload) as Record<string, unknown>).legacyRequestId) === intakeBody.id,
+    );
+    assert.equal(cancelledRequestWorkOrder?.status, "cancelled",
+      "a safe cancellation must atomically close its unassigned canonical work order");
     const unchangedCustomer = db.select().from(containerSystemRecordsTable)
       .where(eq(containerSystemRecordsTable.id, customer.id)).get();
     assert.equal(unchangedCustomer?.payload, existingCustomerPayload,
@@ -1099,6 +1115,56 @@ async function main() {
     );
 
     const lifecycleUrl = `http://127.0.0.1:${port}/api/admin/container-system/contracts/${contract.id}/lifecycle`;
+    const unknownOperation = await fetch(`http://127.0.0.1:${port}/api/admin/service-requests/from-contract`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({
+        clientName: "عميل اختبار — لا يستخدم للتشغيل",
+        phone: testPhone,
+        serviceType: "TEST ONLY — operation not specified",
+        location: testLocation,
+        scheduledAt: "2026-10-15T10:00:00.000Z",
+        customerRecordId: customer.id,
+        containerRecordId: container.id,
+        contractRecordId: contract.id,
+      }),
+    });
+    assert.equal(unknownOperation.status, 422, "unknown operation wording must not silently become a delivery");
+    const directContractStatus = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records/${contract.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ status: "returned" }),
+    });
+    assert.equal(directContractStatus.status, 409, "contract state changes must use the movement-writing lifecycle endpoint");
+    const directContractPayloadStatus = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records/${contract.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ payload: { status: "returned" } }),
+    });
+    assert.equal(directContractPayloadStatus.status, 409, "contract payload status must not bypass the lifecycle endpoint");
+    assert.equal(db.select().from(containerSystemRecordsTable).where(eq(containerSystemRecordsTable.id, contract.id)).get()?.status, "active");
+    const invalidMovement = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({
+        kind: "container_movement",
+        payload: {
+          movementType: "استرجاع",
+          containerCode: "TEST-CONTAINER-001",
+          location: testLocation,
+          operationKey: "test-invalid-movement-001",
+        },
+      }),
+    });
+    assert.equal(invalidMovement.status, 422, "an invalid state transition must reject the movement");
+    assert.equal(
+      db.select().from(containerSystemRecordsTable).all().filter((record) =>
+        record.kind === "container_movement" &&
+        String((JSON.parse(record.payload) as Record<string, unknown>).containerCode) === "TEST-CONTAINER-001",
+      ).length,
+      0,
+      "a rejected movement must not leave an archived/orphaned movement record",
+    );
     const blockedDelivery = await fetch(lifecycleUrl, {
       method: "POST",
       headers: { "content-type": "application/json", authorization },
@@ -1106,18 +1172,64 @@ async function main() {
     });
     assert.equal(blockedDelivery.status, 422, "an open linked delivery request must block container delivery");
 
+    const requestCancelAttempt = await fetch(`http://127.0.0.1:${port}/api/service-requests/${request.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ status: "cancelled" }),
+    });
+    assert.equal(requestCancelAttempt.status, 409, "a contract-linked assigned request must not be cancelled through the generic status endpoint");
+    const directDriverStatusAttempt = await fetch(`http://127.0.0.1:${port}/api/service-requests/${request.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ driverStatus: "completed" }),
+    });
+    assert.equal(directDriverStatusAttempt.status, 422, "driver state must use the evidence-checked work-order route");
+    const requestDeleteAttempt = await fetch(`http://127.0.0.1:${port}/api/service-requests/${request.id}`, {
+      method: "DELETE",
+      headers: { authorization },
+    });
+    assert.equal(requestDeleteAttempt.status, 409, "a request with contract/dispatch history must not be hard-deleted");
+    assert.ok(db.select().from(serviceRequestsTable).where(eq(serviceRequestsTable.id, request.id)).get());
+
     const requestStarted = await fetch(`http://127.0.0.1:${port}/api/service-requests/${request.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json", authorization },
       body: JSON.stringify({ status: "in_progress" }),
     });
     assert.equal(requestStarted.status, 200, await requestStarted.clone().text());
+    const requestOrder = db.select().from(containerSystemRecordsTable).all().find((record) =>
+      record.kind === "work_order" &&
+      Number((JSON.parse(record.payload) as Record<string, unknown>).legacyRequestId) === request.id,
+    );
+    assert.ok(requestOrder, "the linked service request must have a canonical work order");
     const requestCompleted = await fetch(`http://127.0.0.1:${port}/api/service-requests/${request.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json", authorization },
       body: JSON.stringify({ status: "completed" }),
     });
-    assert.equal(requestCompleted.status, 200, await requestCompleted.clone().text());
+    assert.equal(requestCompleted.status, 409, "admin status changes must not bypass driver completion evidence");
+    const stillOpenDelivery = await fetch(lifecycleUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ action: "deliver", location: testLocation }),
+    });
+    assert.equal(stillOpenDelivery.status, 422, "closing the request record alone must not close its dispatch task");
+    const requestOrderPayload = JSON.parse(String(requestOrder?.payload)) as Record<string, unknown>;
+    db.update(containerSystemRecordsTable).set({
+      status: "completed",
+      payload: JSON.stringify({
+        ...requestOrderPayload,
+        status: "completed",
+        driverStatus: "completed",
+        driverProofPhotoUrl: "/uploads/TEST-ONLY-admin-lifecycle-proof.webp",
+        driverSignatureData: "TEST ONLY — lifecycle signature",
+        driverReceiverName: "TEST ONLY — lifecycle receiver",
+      }),
+    }).where(eq(containerSystemRecordsTable.id, requestOrder.id)).run();
+    db.update(serviceRequestsTable).set({
+      status: "completed",
+      driverStatus: "completed",
+    }).where(eq(serviceRequestsTable.id, request.id)).run();
 
     const deliveryResponse = await fetch(lifecycleUrl, {
       method: "POST",
@@ -1131,6 +1243,19 @@ async function main() {
     const rentedContainer = db.select().from(containerSystemRecordsTable)
       .where(eq(containerSystemRecordsTable.id, container.id)).get();
     assert.equal(rentedContainer?.status, "rented");
+    const directAssetStatus = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records/${container.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ status: "available" }),
+    });
+    assert.equal(directAssetStatus.status, 409, "assets must not become available without a return/inspection movement");
+    assert.equal(db.select().from(containerSystemRecordsTable).where(eq(containerSystemRecordsTable.id, container.id)).get()?.status, "rented");
+    const contractTermsEdit = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records/${contract.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ payload: { amount: 125, total: 125 } }),
+    });
+    assert.equal(contractTermsEdit.status, 409, "contract terms must be immutable after an operational movement");
 
     const returnResponse = await fetch(lifecycleUrl, {
       method: "POST",
