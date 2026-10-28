@@ -1018,7 +1018,14 @@ async function main() {
       headers: { "content-type": "application/json", authorization },
       body: JSON.stringify({ status: "cancelled" }),
     });
-    assert.equal(safeRequestCancellation.status, 200, await safeRequestCancellation.clone().text());
+    if (safeRequestCancellation.status !== 200) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(
+      safeRequestCancellation.status,
+      200,
+      `${await safeRequestCancellation.clone().text()}\n${startupOutput.slice(-12_000)}`,
+    );
     const cancelledRequest = db.select().from(serviceRequestsTable)
       .where(eq(serviceRequestsTable.id, intakeBody.id)).get();
     assert.equal(cancelledRequest?.status, "cancelled");

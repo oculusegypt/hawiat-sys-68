@@ -1134,8 +1134,8 @@ router.patch("/service-requests/:id", requireAdmin, requireSectionPermission("re
       }
     }
 
-    const requestUpdateData: UpdateFields = status === "cancelled" || status === "rejected"
-      ? { ...updateData, driverStatus: status }
+    const requestUpdateData: UpdateFields = status === "rejected"
+      ? { ...updateData, driverStatus: "rejected" }
       : updateData;
     const request = tx.update(serviceRequestsTable)
       .set(requestUpdateData)
@@ -1306,7 +1306,8 @@ router.patch("/service-requests/:id/assignment", requireAdmin, requireSectionPer
       if (freshOrder.reconciliationRequired) {
         return { error: "هذه المهمة متعارضة وتحتاج مراجعة الإدارة قبل إسنادها", status: 409 as const };
       }
-      if (["completed", "rejected", "cancelled", "closed"].includes(freshOrder.driverStatus)) {
+      if (["completed", "rejected", "cancelled", "closed"].includes(freshOrder.driverStatus) ||
+          ["completed", "rejected", "cancelled", "closed"].includes(freshOrder.status)) {
         return { error: "لا يمكن إعادة إسناد أمر عمل مغلق", status: 409 as const };
       }
       const existingDispatches: ScheduledDispatch[] = [

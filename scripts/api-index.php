@@ -3005,7 +3005,7 @@ try {
             }
         }
         $terminalRequestStatus = in_array((string)($input['status'] ?? ''), ['cancelled', 'rejected'], true);
-        if ($terminalRequestStatus) {
+        if (($input['status'] ?? '') === 'rejected') {
             $fields[] = "driver_status = :terminalDriverStatus";
             $params[':terminalDriverStatus'] = (string)$input['status'];
         }
@@ -3021,6 +3021,13 @@ try {
                     $pdo->rollBack();
                     http_response_code($fresh ? 409 : 404);
                     echo json_encode(['error' => $fresh ? 'تغير الطلب أثناء التعديل؛ أعد تحميله قبل الحفظ' : 'الطلب غير موجود'], JSON_UNESCAPED_UNICODE);
+                    exit;
+                }
+                $freshIssue = hsServiceRequestMutationIssue($pdo, $fresh, $input);
+                if ($freshIssue) {
+                    $pdo->rollBack();
+                    http_response_code((int)$freshIssue['status']);
+                    echo json_encode(['error' => $freshIssue['error']], JSON_UNESCAPED_UNICODE);
                     exit;
                 }
                 $sql = "UPDATE service_requests SET " . implode(', ', $fields) . " WHERE id = :id";
@@ -3048,7 +3055,9 @@ try {
                         $beforePayload = (string)$linkedOrder['payload'];
                         $nextPayload = hsPayload($beforePayload);
                         $nextPayload['status'] = (string)$input['status'];
-                        $nextPayload['driverStatus'] = (string)$input['status'];
+                        if ((string)$input['status'] === 'rejected') {
+                            $nextPayload['driverStatus'] = 'rejected';
+                        }
                         $nextJson = json_encode($nextPayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
                         $pdo->prepare("UPDATE container_system_records SET status=:status,payload=:payload,updated_at=:now WHERE id=:id")
                             ->execute([
@@ -3300,32 +3309,40 @@ try {
     // 10d. Service Request Delete: DELETE /api/service-requests/{id}
     if (preg_match('#^/service-requests/(\d+)$#', $path, $m) && $method === 'DELETE') {
         $id = (int)$m[1];
-        $requestStmt = $pdo->prepare("SELECT * FROM service_requests WHERE id = :id LIMIT 1");
-        $requestStmt->execute([':id' => $id]);
-        $request = $requestStmt->fetch(PDO::FETCH_ASSOC);
-        if (!$request) {
-            http_response_code(404);
-            echo json_encode(['error' => 'الطلب غير موجود'], JSON_UNESCAPED_UNICODE);
-            exit;
+        $pdo->beginTransaction();
+        try {
+            $requestStmt = $pdo->prepare("SELECT * FROM service_requests WHERE id = :id LIMIT 1");
+            $requestStmt->execute([':id' => $id]);
+            $request = $requestStmt->fetch(PDO::FETCH_ASSOC);
+            if (!$request) {
+                $pdo->rollBack();
+                http_response_code(404);
+                echo json_encode(['error' => 'الطلب غير موجود'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            $linkedStmt = $pdo->prepare("SELECT id FROM container_system_records
+                WHERE kind='work_order' AND status<>'archived'
+                AND json_extract(payload, '$.legacyRequestId') = :id LIMIT 1");
+            $linkedStmt->execute([':id' => $id]);
+            $hasLifecycleHistory = (bool)$linkedStmt->fetchColumn()
+                || (int)($request['contract_record_id'] ?? 0) > 0
+                || (int)($request['container_record_id'] ?? 0) > 0
+                || (int)($request['assigned_driver_id'] ?? 0) > 0
+                || (int)($request['assigned_vehicle_id'] ?? 0) > 0
+                || (string)($request['status'] ?? 'pending') !== 'pending'
+                || (string)($request['driver_status'] ?? 'unassigned') !== 'unassigned';
+            if ($hasLifecycleHistory) {
+                $pdo->rollBack();
+                http_response_code(409);
+                echo json_encode(['error' => 'لا يمكن حذف طلب له ارتباط تشغيلي؛ احتفظ بسجله وألغِه من مسار الإلغاء المناسب'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            $pdo->prepare("DELETE FROM service_requests WHERE id = :id")->execute([':id' => $id]);
+            $pdo->commit();
+        } catch (Throwable $error) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            throw $error;
         }
-        $linkedStmt = $pdo->prepare("SELECT id FROM container_system_records
-            WHERE kind='work_order' AND status<>'archived'
-            AND json_extract(payload, '$.legacyRequestId') = :id LIMIT 1");
-        $linkedStmt->execute([':id' => $id]);
-        $hasLifecycleHistory = (bool)$linkedStmt->fetchColumn()
-            || (int)($request['contract_record_id'] ?? 0) > 0
-            || (int)($request['container_record_id'] ?? 0) > 0
-            || (int)($request['assigned_driver_id'] ?? 0) > 0
-            || (int)($request['assigned_vehicle_id'] ?? 0) > 0
-            || (string)($request['status'] ?? 'pending') !== 'pending'
-            || (string)($request['driver_status'] ?? 'unassigned') !== 'unassigned';
-        if ($hasLifecycleHistory) {
-            http_response_code(409);
-            echo json_encode(['error' => 'لا يمكن حذف طلب له ارتباط تشغيلي؛ احتفظ بسجله وألغِه من مسار الإلغاء المناسب'], JSON_UNESCAPED_UNICODE);
-            exit;
-        }
-        $stmt = $pdo->prepare("DELETE FROM service_requests WHERE id = :id");
-        $stmt->execute([':id' => $id]);
         echo json_encode(['success' => true, 'id' => $id], JSON_UNESCAPED_UNICODE);
         exit;
     }

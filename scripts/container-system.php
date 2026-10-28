@@ -2134,9 +2134,6 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             if ($current['kind'] === 'ledger_entry') hsJson(['error' => 'قيد الأستاذ لا يُعدّل مباشرة؛ صحح المستند المالي الأصلي بحركة عكسية موثقة'], 409);
             $mutationIssue = hsProtectedRecordMutationIssue($current, $input);
             if ($mutationIssue) hsJson(['error' => $mutationIssue['error']], (int)$mutationIssue['status']);
-            if (in_array((string)$current['kind'], ['container', 'container_asset'], true)) {
-                $currentAssetStatus = hsCanonicalAssetStatus((string)$current['status'], (string)$current['status']);
-            }
             $payload = array_merge(hsPayload($current['payload']), is_array($input['payload'] ?? null) ? $input['payload'] : []);
             if (in_array((string)$current['kind'], ['container', 'container_asset'], true)) {
                 $payload['status'] = hsCanonicalAssetStatus((string)$current['status'], (string)$current['status']);
