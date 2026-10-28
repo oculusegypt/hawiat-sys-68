@@ -1018,9 +1018,6 @@ async function main() {
       headers: { "content-type": "application/json", authorization },
       body: JSON.stringify({ status: "cancelled" }),
     });
-    if (safeRequestCancellation.status !== 200) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
     assert.equal(
       safeRequestCancellation.status,
       200,
@@ -1029,13 +1026,36 @@ async function main() {
     const cancelledRequest = db.select().from(serviceRequestsTable)
       .where(eq(serviceRequestsTable.id, intakeBody.id)).get();
     assert.equal(cancelledRequest?.status, "cancelled");
-    assert.equal(cancelledRequest?.driverStatus, "cancelled");
+    assert.equal(
+      cancelledRequest?.driverStatus,
+      "unassigned",
+      "cancelling a request must not write the request-only status into the driver's constrained status field",
+    );
     const cancelledRequestWorkOrder = db.select().from(containerSystemRecordsTable).all().find((record) =>
       record.kind === "work_order" &&
       Number((JSON.parse(record.payload) as Record<string, unknown>).legacyRequestId) === intakeBody.id,
     );
     assert.equal(cancelledRequestWorkOrder?.status, "cancelled",
       "a safe cancellation must atomically close its unassigned canonical work order");
+    const cancelledWorkOrderPayload = JSON.parse(String(cancelledRequestWorkOrder?.payload)) as Record<string, unknown>;
+    assert.equal(cancelledWorkOrderPayload.driverStatus, "unassigned");
+    const cancelledWorkOrderAssignment = await fetch(
+      `http://127.0.0.1:${port}/api/service-requests/${cancelledRequestWorkOrder?.id}/assignment`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", authorization },
+        body: JSON.stringify({
+          recordType: "work_order",
+          driverId: driver.id,
+          vehicleId: null,
+        }),
+      },
+    );
+    assert.equal(
+      cancelledWorkOrderAssignment.status,
+      409,
+      "a cancelled work order cannot be reassigned even though its driver status remains unassigned",
+    );
     const unchangedCustomer = db.select().from(containerSystemRecordsTable)
       .where(eq(containerSystemRecordsTable.id, customer.id)).get();
     assert.equal(unchangedCustomer?.payload, existingCustomerPayload,
