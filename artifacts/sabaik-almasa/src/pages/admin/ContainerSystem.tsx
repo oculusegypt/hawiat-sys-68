@@ -30,6 +30,7 @@ import {
   contractDisplayNumber,
   invoiceBelongsToContract,
   invoiceContractDisplayNumber,
+  invoiceNetPaidAmount,
 } from "@/lib/containerFinancialRelations"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -821,10 +822,9 @@ function customerData(record: ContainerSystemRecord, allRecords: ContainerSystem
     const value = Number(item.payload.total ?? item.payload.totalAmount ?? item.payload.amount ?? 0)
     return sum + (Number.isFinite(value) ? value : 0)
   }, 0)
-  const paid = payments.reduce((sum, item) => sum + amountOf(item), 0) || invoices.reduce((sum, item) => {
-    const value = Number(item.payload.paid ?? item.payload.paidAmount ?? 0)
-    return sum + (Number.isFinite(value) ? value : 0)
-  }, 0)
+  const paid = invoices.length > 0
+    ? invoices.reduce((sum, invoice) => sum + invoiceNetPaidAmount(invoice, allRecords), 0)
+    : Math.max(payments.reduce((sum, item) => sum + amountOf(item), 0), 0)
   const rawStatus = String(payload.status ?? record.status ?? "active").trim()
   const normalizedStatus = rawStatus.toLowerCase()
   const filterStatus: Exclude<CustomerFilter, "all"> =
@@ -1180,25 +1180,11 @@ function InvoiceWorkspace({ records, onAdd, onDetails, onEdit, onArchive }: { re
   const [filter, setFilter] = useState<InvoiceFilter>("all")
   const [search, setSearch] = useState("")
   const activeRecords = records.filter(record => record.kind === "invoice" && record.status !== "archived")
-  const payments = records.filter(record => record.kind === "payment" && record.status === "posted")
   const money = (value: number) => `${value.toLocaleString("ar-SA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ر.س`
   const invoiceData = (record: ContainerSystemRecord) => {
     const payload = record.payload as Record<string, unknown>
     const number = String(payload.invoiceNumber ?? record.reference ?? "")
-    const linkedPayments = payments.filter(payment => {
-      const p = payment.payload as Record<string, unknown>
-      return Number(p.invoiceRecordId ?? 0) === record.id || String(p.invoiceNumber ?? "") === number
-    })
-    // The API persists the authoritative paid value after each posting. Do not
-    // add the same posted payments again, otherwise a 500 + 100 cycle renders
-    // as 1200 after the invoice payload has been updated.
-    const paidFromPostedPayments = linkedPayments.reduce((sum, payment) => {
-      const p = payment.payload as Record<string, unknown>
-      return sum + Number(p.amount ?? p.total ?? 0)
-    }, 0)
-    const paid = Number.isFinite(Number(payload.paid))
-      ? Number(payload.paid)
-      : paidFromPostedPayments
+    const paid = invoiceNetPaidAmount(record, records)
     const total = Number(payload.total ?? payload.amount ?? 0) || 0
     const remaining = Math.max(total - paid, 0)
     const dueDate = String(payload.dueDate ?? payload.paymentDueDate ?? payload.endDate ?? payload.date ?? "").slice(0, 10)
@@ -1868,8 +1854,13 @@ function ContractRecordDetails({
             {contractInvoices.length === 0 ? <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-xs font-bold text-amber-800">لا توجد فاتورة مرتبطة بهذا العقد حالياً.</p> : <div className="mt-3 grid gap-2">{contractInvoices.map(invoice => {
               const invoicePayload = invoice.payload as Record<string, unknown>
               const total = Number(invoicePayload.total ?? invoicePayload.amount ?? 0)
-              const paid = Number(invoicePayload.paid ?? invoicePayload.paidAmount ?? 0)
-              const status = String(invoicePayload.invoiceStatus ?? invoice.status ?? "issued")
+              const paid = invoiceNetPaidAmount(invoice, allRecords)
+              const storedStatus = String(invoicePayload.invoiceStatus ?? invoice.status ?? "issued")
+              const status = paid >= total && total > 0
+                ? "paid"
+                : paid > 0
+                  ? "partially_paid"
+                  : storedStatus
               return <button type="button" key={invoice.id} onClick={() => { onOpenChange(false); navigate(`/admin/container-system/invoice/${invoice.id}/details`) }} className="flex w-full flex-col gap-2 rounded-xl border border-transparent bg-white p-3 text-right transition hover:border-cyan-200 hover:bg-cyan-50/70 sm:grid sm:grid-cols-[1.2fr_1fr_1fr_1fr_auto] sm:items-center" data-testid={`button-open-contract-invoice-${invoice.id}`}>
                 <span className="font-mono font-black text-cyan-800" dir="ltr">{String(invoicePayload.invoiceNumber ?? invoice.reference ?? `INV-${invoice.id}`)}</span>
                 <span><small className="block text-[10px] text-slate-400">الفترة</small>{String(invoicePayload.billingPeriod ?? invoicePayload.date ?? "غير محددة")}</span>
@@ -2404,7 +2395,7 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
                {contractInvoices.length === 0 ? <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-xs font-bold text-amber-800">لا توجد فاتورة لهذه الفترة بعد. ستنشأ تلقائيًا عند اعتماد العقد إذا كان مؤهلاً للفوترة.</p> : <div className="mt-3 space-y-2">{contractInvoices.map(invoice => {
                  const invoicePayload = invoice.payload as Record<string, unknown>
                  const total = Number(invoicePayload.total ?? invoicePayload.amount ?? 0)
-                 const paid = Number(invoicePayload.paid ?? 0)
+                 const paid = invoiceNetPaidAmount(invoice, allRecords)
                  return <button type="button" key={invoice.id} onClick={() => { onOpenChange(false); navigate(`/admin/container-system/invoice/${invoice.id}/details`) }} className="grid w-full gap-2 rounded-xl bg-white p-3 text-right transition hover:bg-cyan-100/60 sm:grid-cols-[1.2fr_1fr_1fr_1fr_1fr]"><span className="font-black text-cyan-800" dir="ltr">{String(invoicePayload.invoiceNumber ?? invoice.reference)}</span><span><small className="block text-[10px] text-slate-400">الفترة</small>{String(invoicePayload.billingPeriod ?? invoicePayload.date ?? "—")}</span><span><small className="block text-[10px] text-slate-400">الإجمالي</small>{total.toLocaleString("ar-SA")} ر.س</span><span><small className="block text-[10px] text-slate-400">المدفوع</small><span className="text-emerald-700">{paid.toLocaleString("ar-SA")} ر.س</span></span><span><small className="block text-[10px] text-slate-400">المتبقي</small><span className="font-black text-rose-700">{Math.max(total - paid, 0).toLocaleString("ar-SA")} ر.س</span></span></button>
                })}</div>}
              </div>
@@ -2777,8 +2768,14 @@ export default function ContainerSystem() {
     })
   }
   const submitAssignment = (payload: Record<string, unknown>) => {
-    createMutation.mutate({ data: { kind: "container_assignment", status: "reserved", payload } }, {
-      onSuccess: () => { invalidate(); setAssignmentWizardOpen(false); showSuccess("تم تخصيص الأصل وربطه بالعقد والموقع") },
+    createMutation.mutate({
+      data: {
+        kind: "container_assignment",
+        status: "reserved",
+        payload: { ...payload, operationKey: crypto.randomUUID() },
+      },
+    }, {
+      onSuccess: () => { invalidate(); setAssignmentWizardOpen(false); showSuccess("تم تخصيص الحاوية وربطها بالعقد والموقع وإنشاء أمر تشغيل للتسليم") },
       onError: error => toast({ title: error instanceof Error ? error.message : "تعذر حفظ التخصيص", variant: "destructive" }),
     })
   }

@@ -10,7 +10,7 @@ import { PenLine, Plus, RotateCcw, Save, Trash2, X } from "lucide-react"
 import {
   contractDisplayNumber,
   invoiceBelongsToContract,
-  paymentAmountForInvoice,
+  invoiceNetPaidAmount,
 } from "@/lib/containerFinancialRelations"
 
 const API_BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") || ""
@@ -40,10 +40,7 @@ function canonicalCollections(records: ContainerSystemRecord[]) {
 }
 
 function collectionAmountForInvoice(records: ContainerSystemRecord[], invoice: ContainerSystemRecord) {
-  return canonicalCollections(records).reduce(
-    (sum, payment) => sum + paymentAmountForInvoice(payment, invoice, records),
-    0,
-  )
+  return invoiceNetPaidAmount(invoice, records)
 }
 
 export type RecordKind =

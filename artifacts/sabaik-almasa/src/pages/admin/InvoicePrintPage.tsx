@@ -9,7 +9,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   contractDisplayNumber,
   invoiceContractForRecord,
-  paymentAmountForInvoice,
+  invoiceFinancialEntries,
+  invoiceNetPaidAmount,
 } from "@/lib/containerFinancialRelations"
 
 const money = (value: number) => `${value.toLocaleString("ar-SA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ر.س`
@@ -46,14 +47,8 @@ export default function InvoicePrintPage() {
     ? invoiceContractForRecord(record, records.filter(item => item.kind === "contract"))
     : undefined
   const site = records.find(item => item.kind === "customer_site" && item.id === Number(p.siteRecordId))
-  const payments = record
-    ? records.filter(item =>
-        item.kind === "payment" && paymentAmountForInvoice(item, record, records) > 0,
-      )
-    : []
-  const paid = record
-    ? payments.reduce((sum, item) => sum + paymentAmountForInvoice(item, record, records), 0)
-    : 0
+  const paymentEntries = record ? invoiceFinancialEntries(record, records) : []
+  const paid = record ? invoiceNetPaidAmount(record, records) : 0
   const subtotal = Number(p.subtotal ?? p.amount ?? 0)
   const tax = Number(p.taxAmount ?? 0)
   const total = Number(p.total ?? subtotal + tax)
@@ -114,8 +109,11 @@ export default function InvoicePrintPage() {
         <Card className="border-slate-200 shadow-sm"><CardHeader><CardTitle>ملخص المبالغ</CardTitle></CardHeader><CardContent className="space-y-3 text-sm"><div className="flex justify-between"><span>قبل الضريبة</span><b>{money(subtotal)}</b></div><div className="flex justify-between"><span>ضريبة القيمة المضافة ({value(p.taxRate, "15")}% )</span><b>{money(tax)}</b></div><div className="flex justify-between border-t pt-3 text-lg"><span className="font-black">الإجمالي</span><b className="text-cyan-800">{money(total)}</b></div><div className="flex justify-between text-emerald-700"><span>المدفوع المرحّل</span><b>{money(paid)}</b></div><div className="flex justify-between font-black text-rose-700"><span>المتبقي</span><b>{money(remaining)}</b></div></CardContent></Card>
       </div>
       <Card className="border-slate-200 shadow-sm"><CardHeader><CardTitle>الحاوية / الأصل المفوتر</CardTitle></CardHeader><CardContent><div className="overflow-x-auto"><table className="w-full min-w-[680px] text-sm"><thead><tr className="border-b bg-slate-50 text-right text-xs text-slate-500"><th className="p-3">الحاوية</th><th className="p-3">الخدمة</th><th className="p-3">الفترة</th><th className="p-3">الكمية</th><th className="p-3">السعر</th><th className="p-3">الضريبة</th><th className="p-3">الإجمالي</th></tr></thead><tbody><tr><td className="p-3 font-black text-cyan-800">#{containerCode}</td><td className="p-3">{value(p.description, "خدمات الحاوية")}</td><td className="p-3">{dateOnly(p.startDate)} → {dateOnly(p.endDate)}</td><td className="p-3">{value(p.quantity, "1")}</td><td className="p-3">{money(Number(p.unitPrice ?? subtotal))}</td><td className="p-3">{money(tax)}</td><td className="p-3 font-black">{money(total)}</td></tr></tbody></table></div></CardContent></Card>
-      <Card className="border-slate-200 shadow-sm"><CardHeader><div className="flex items-center justify-between gap-3"><CardTitle>الدفعات المرحّلة</CardTitle><Button size="sm" onClick={() => customerId && navigate(`/admin/container-system/profile/customer/${customerId}?paymentInvoiceId=${id}`)} className="gap-2 bg-emerald-700 hover:bg-emerald-800"><HandCoins size={14} /> تسجيل دفعة</Button></div></CardHeader><CardContent>{payments.length === 0 ? <p className="py-6 text-center text-sm text-slate-500">لا توجد دفعات مرحّلة مرتبطة بهذه الفاتورة.</p> : <div className="space-y-2">{payments.map(payment => <div key={payment.id} className="flex items-center justify-between rounded-xl bg-emerald-50 p-3 text-sm"><span>{dateOnly(payloadOf(payment).date ?? payment.createdAt)} · {value(payloadOf(payment).paymentMethod, "تحويل/تحصيل")}</span><b className="text-emerald-800">{money(Number(payloadOf(payment).amount ?? 0))}</b></div>)}</div>}</CardContent></Card>
-      <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div><p className="font-black text-slate-800">المستند المالي المرتبط</p><p className="mt-1 text-xs text-slate-500">تُحسب الحالة من الدفعات المرحّلة فقط، ولا يمكن تغييرها كنص مستقل.</p></div><img src={qrUrl} alt="رمز الفاتورة" className="h-20 w-20" /></div>
+        <Card className="border-slate-200 shadow-sm"><CardHeader><div className="flex items-center justify-between gap-3"><CardTitle>الدفعات والمرتجعات المرحّلة</CardTitle><Button size="sm" onClick={() => customerId && navigate(`/admin/container-system/profile/customer/${customerId}?paymentInvoiceId=${id}`)} className="gap-2 bg-emerald-700 hover:bg-emerald-800"><HandCoins size={14} /> تسجيل دفعة</Button></div></CardHeader><CardContent>{paymentEntries.length === 0 ? <p className="py-6 text-center text-sm text-slate-500">لا توجد دفعات أو مرتجعات مرحّلة مرتبطة بهذه الفاتورة.</p> : <div className="space-y-2">{paymentEntries.map(({ record: payment, amount }) => {
+          const isReturn = payment.kind === "payment_return"
+          return <div key={`${payment.kind}-${payment.id}`} className={`flex items-center justify-between rounded-xl p-3 text-sm ${isReturn ? "bg-rose-50" : "bg-emerald-50"}`}><span>{dateOnly(payloadOf(payment).date ?? payment.createdAt)} · {isReturn ? "مرتجع سداد" : value(payloadOf(payment).paymentMethod, "تحويل/تحصيل")}</span><b className={isReturn ? "text-rose-800" : "text-emerald-800"}>{money(isReturn ? -amount : amount)}</b></div>
+        })}</div>}</CardContent></Card>
+       <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div><p className="font-black text-slate-800">المستند المالي المرتبط</p><p className="mt-1 text-xs text-slate-500">تُحسب الحالة من صافي الدفعات المرحّلة بعد طرح المرتجعات، ولا يمكن تغييرها كنص مستقل.</p></div><img src={qrUrl} alt="رمز الفاتورة" className="h-20 w-20" /></div>
      </main>
      <article className="invoice-print-view invoice-print-paper mx-auto bg-white px-[16mm] py-[14mm] text-slate-900 shadow-2xl">
        <header className="flex items-start justify-between border-b-2 border-cyan-800 pb-5">

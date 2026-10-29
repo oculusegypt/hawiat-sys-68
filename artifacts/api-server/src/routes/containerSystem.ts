@@ -27,7 +27,7 @@ const supportedKinds = [
 type RecordKind = typeof supportedKinds[number];
 const idempotentKinds = new Set([
   "container_movement", "receipt", "payment", "expense", "deposit", "bank_deposit", "bank_fee",
-  "invoice", "invoice_return", "payment_return", "transfer", "purchase", "purchase_return", "contract", "work_order",
+  "invoice", "invoice_return", "payment_return", "transfer", "purchase", "purchase_return", "contract", "work_order", "container_assignment",
   "other_revenue",
 ]);
 const financialLifecycleKinds = new Set([
@@ -162,6 +162,151 @@ function financialRecordReferencesContract(
   const recordNumber = String(payload.contractNumber ?? "").trim();
   const contractNumber = contractRecordNumber(contract);
   return Boolean(contractNumber && recordNumber === contractNumber);
+}
+
+function invoiceCollectionAmount(
+  payment: typeof containerSystemRecordsTable.$inferSelect,
+  invoice: typeof containerSystemRecordsTable.$inferSelect,
+  all: typeof containerSystemRecordsTable.$inferSelect[],
+) {
+  if (!["payment", "receipt"].includes(payment.kind) || payment.status !== "posted") return 0;
+  const payload = parsePayload(payment.payload);
+  const invoicePayload = parsePayload(invoice.payload);
+  const paymentCustomerId = Number(payload.customerRecordId ?? 0);
+  const invoiceCustomerId = Number(invoicePayload.customerRecordId ?? 0);
+  if (paymentCustomerId > 0 && invoiceCustomerId > 0 && paymentCustomerId !== invoiceCustomerId) return 0;
+
+  if (Array.isArray(payload.allocations)) {
+    return (payload.allocations as Record<string, unknown>[]).reduce((sum, allocation) => {
+      if (Number(allocation.invoiceId ?? 0) !== invoice.id) return sum;
+      const contractId = Number(allocation.contractId ?? 0);
+      if (contractId > 0) {
+        const contract = all.find(row => row.kind === "contract" && row.id === contractId);
+        if (!contract || !invoiceBelongsToContract(invoice, contract)) return sum;
+        const contractCustomerId = Number(parsePayload(contract.payload).customerRecordId ?? 0);
+        if (paymentCustomerId > 0 && contractCustomerId > 0 && paymentCustomerId !== contractCustomerId) return sum;
+      }
+      return sum + Number(allocation.amount ?? 0);
+    }, 0);
+  }
+
+  const directInvoiceId = Number(payload.invoiceRecordId ?? payload.invoiceId ?? 0);
+  if (directInvoiceId > 0) return directInvoiceId === invoice.id ? Number(payload.amount ?? 0) : 0;
+
+  const invoiceNumber = String(invoicePayload.invoiceNumber ?? invoice.reference ?? "").trim();
+  const paymentInvoiceNumber = String(payload.invoiceNumber ?? "").trim();
+  if (!invoiceNumber || invoiceNumber !== paymentInvoiceNumber) return 0;
+  const contractId = Number(payload.contractRecordId ?? payload.contractId ?? payload.linkedContractId ?? 0);
+  if (contractId > 0) {
+    const contract = all.find(row => row.kind === "contract" && row.id === contractId);
+    if (!contract || !invoiceBelongsToContract(invoice, contract)) return 0;
+    const contractCustomerId = Number(parsePayload(contract.payload).customerRecordId ?? 0);
+    if (paymentCustomerId > 0 && contractCustomerId > 0 && paymentCustomerId !== contractCustomerId) return 0;
+    return Number(payload.amount ?? 0);
+  }
+  const matches = all.filter(row => {
+    if (row.kind !== "invoice") return false;
+    const candidate = parsePayload(row.payload);
+    if (String(candidate.invoiceNumber ?? row.reference ?? "").trim() !== invoiceNumber) return false;
+    const customerId = Number(candidate.customerRecordId ?? 0);
+    return paymentCustomerId > 0 ? customerId === paymentCustomerId : customerId <= 0;
+  });
+  return matches.length === 1 && matches[0].id === invoice.id ? Number(payload.amount ?? 0) : 0;
+}
+
+function invoiceReturnAmount(
+  returned: typeof containerSystemRecordsTable.$inferSelect,
+  invoice: typeof containerSystemRecordsTable.$inferSelect,
+  all: typeof containerSystemRecordsTable.$inferSelect[],
+) {
+  if (returned.kind !== "payment_return" || returned.status !== "posted" || invoice.kind !== "invoice") return 0;
+  const payload = parsePayload(returned.payload);
+  const invoicePayload = parsePayload(invoice.payload);
+  const returnCustomerId = Number(payload.customerRecordId ?? 0);
+  const invoiceCustomerId = Number(invoicePayload.customerRecordId ?? 0);
+  if (returnCustomerId > 0 && invoiceCustomerId > 0 && returnCustomerId !== invoiceCustomerId) return 0;
+  const amount = Number(payload.amount ?? payload.total ?? 0);
+  if (!Number.isFinite(amount) || amount <= 0) return 0;
+
+  const contractId = Number(payload.contractRecordId ?? payload.contractId ?? payload.linkedContractId ?? 0);
+  if (contractId > 0) {
+    const contract = all.find(row => row.kind === "contract" && row.id === contractId);
+    if (!contract || !invoiceBelongsToContract(invoice, contract)) return 0;
+    const contractCustomerId = Number(parsePayload(contract.payload).customerRecordId ?? 0);
+    if (returnCustomerId > 0 && contractCustomerId > 0 && returnCustomerId !== contractCustomerId) return 0;
+  }
+
+  const allocations = Array.isArray(payload.allocations)
+    ? payload.allocations as Record<string, unknown>[]
+    : [];
+  const allocatedInvoiceIds = allocations.map(item => Number(item.invoiceId ?? 0)).filter(id => id > 0);
+  if (allocatedInvoiceIds.length > 0) {
+    return allocations.reduce((sum, allocation) => {
+      if (Number(allocation.invoiceId ?? 0) !== invoice.id) return sum;
+      const allocationContractId = Number(allocation.contractId ?? 0);
+      if (allocationContractId > 0) {
+        const contract = all.find(row => row.kind === "contract" && row.id === allocationContractId);
+        if (!contract || !invoiceBelongsToContract(invoice, contract)) return sum;
+      }
+      return sum + Math.max(Number(allocation.amount ?? 0), 0);
+    }, 0);
+  }
+
+  const directInvoiceId = Number(payload.invoiceRecordId ?? payload.originalInvoiceId ?? payload.invoiceId ?? 0);
+  if (directInvoiceId > 0) return directInvoiceId === invoice.id ? amount : 0;
+
+  const originalPaymentId = Number(payload.originalPaymentId ?? payload.sourcePaymentId ?? 0);
+  if (originalPaymentId > 0) {
+    const original = all.find(row =>
+      ["payment", "receipt"].includes(row.kind) &&
+      row.status === "posted" &&
+      row.id === originalPaymentId,
+    );
+    if (!original) return 0;
+    const linkedAmount = invoiceCollectionAmount(original, invoice, all);
+    if (linkedAmount <= 0) return 0;
+    const originalPayload = parsePayload(original.payload);
+    const originalAllocations = Array.isArray(originalPayload.allocations)
+      ? originalPayload.allocations as Record<string, unknown>[]
+      : null;
+    if (originalAllocations) {
+      const invoiceIds = [...new Set(originalAllocations
+        .map(item => Number(item.invoiceId ?? 0))
+        .filter(id => id > 0))];
+      const entirelyAllocatedToInvoice = invoiceIds.length === 1 &&
+        invoiceIds[0] === invoice.id &&
+        originalAllocations.every(item => Number(item.invoiceId ?? 0) === invoice.id);
+      const originalTotal = Number(originalPayload.amount ?? originalPayload.total ?? 0);
+      if (!entirelyAllocatedToInvoice && amount + 0.01 < originalTotal) return 0;
+    }
+    return Math.min(amount, linkedAmount);
+  }
+
+  const returnInvoiceNumber = String(payload.invoiceNumber ?? payload.originalInvoiceNumber ?? "").trim();
+  const invoiceNumber = String(invoicePayload.invoiceNumber ?? invoice.reference ?? "").trim();
+  if (!returnInvoiceNumber || returnInvoiceNumber !== invoiceNumber) return 0;
+  const matchingInvoices = all.filter(row => {
+    if (row.kind !== "invoice") return false;
+    const candidate = parsePayload(row.payload);
+    if (String(candidate.invoiceNumber ?? row.reference ?? "").trim() !== returnInvoiceNumber) return false;
+    const customerId = Number(candidate.customerRecordId ?? 0);
+    return returnCustomerId > 0 ? customerId === returnCustomerId : customerId <= 0;
+  });
+  return matchingInvoices.length === 1 && matchingInvoices[0].id === invoice.id ? amount : 0;
+}
+
+function invoiceNetPaidAmount(
+  invoice: typeof containerSystemRecordsTable.$inferSelect,
+  all: typeof containerSystemRecordsTable.$inferSelect[],
+) {
+  const gross = postedCollections(all).reduce(
+    (sum, payment) => sum + invoiceCollectionAmount(payment, invoice, all),
+    0,
+  );
+  const returned = all
+    .filter(row => row.kind === "payment_return" && row.status === "posted")
+    .reduce((sum, row) => sum + invoiceReturnAmount(row, invoice, all), 0);
+  return Math.max(gross - returned, 0);
 }
 
 const contractTermsFields = [
@@ -2405,13 +2550,7 @@ router.post("/admin/container-system/financial/settle", requireContainerPermissi
               createdBy: invoice.createdBy,
             });
           }
-          const invoicePaid = collectionRows.reduce((sum, row) => {
-            const payment = parsePayload(row.payload);
-            const entry = Array.isArray(payment.allocations)
-              ? payment.allocations.find((allocation: unknown) => Number((allocation as Record<string, unknown>).invoiceId) === invoice.id)
-              : Number(payment.invoiceRecordId ?? 0) === invoice.id ? { amount: payment.amount } : null;
-            return sum + Number(entry ? (entry as Record<string, unknown>).amount ?? 0 : 0);
-          }, 0);
+          const invoicePaid = invoiceNetPaidAmount(invoice, all);
           if (Number.isFinite(invoiceTotal) && invoicePaid + item.amount > invoiceTotal + 0.01) throw new Error("قيمة التحصيل تتجاوز المتبقي في الفاتورة");
         }
         return { ...item, contract, contractPayload, contractNumber, paid, total };
@@ -2486,13 +2625,7 @@ router.post("/admin/container-system/financial/settle", requireContainerPermissi
           if (invoice) {
             const invoicePayload = parsePayload(invoice.payload);
             const invoiceTotal = Number(invoicePayload.total ?? invoicePayload.amount ?? 0);
-            const invoicePaidBefore = collectionRows.reduce((sum, row) => {
-              const paymentPayload = parsePayload(row.payload);
-              const allocation = Array.isArray(paymentPayload.allocations)
-                ? paymentPayload.allocations.find((entry: unknown) => Number((entry as Record<string, unknown>).invoiceId) === invoice.id)
-                : Number(paymentPayload.invoiceRecordId ?? 0) === invoice.id ? { amount: paymentPayload.amount } : null;
-              return sum + Number((allocation as Record<string, unknown> | null)?.amount ?? 0);
-            }, 0);
+            const invoicePaidBefore = invoiceNetPaidAmount(invoice, all);
             const invoicePaid = invoicePaidBefore + item.amount;
             const invoiceRemaining = Math.max(invoiceTotal - invoicePaid, 0);
             const nextInvoiceStatus = invoiceRemaining <= 0.01
@@ -2662,11 +2795,11 @@ router.post("/admin/container-system/contracts/:id/lifecycle", requireContainerP
           const invoicePayload = parsePayload(invoice.payload);
           const invoiceTotal = Number(invoicePayload.total ?? invoicePayload.amount ?? 0);
           if (!Number.isFinite(invoiceTotal) || invoiceTotal <= 0.01) continue;
-          const invoiceRemaining = Number(invoicePayload.remaining ?? (invoiceTotal - Number(invoicePayload.paid ?? 0)));
+          const invoiceRemaining = Math.max(invoiceTotal - invoiceNetPaidAmount(invoice, allRows), 0);
           const invoicePosting = sqlite.prepare(
             "SELECT id FROM financial_transactions WHERE source_kind = 'invoice' AND source_id = ? AND status = 'posted' LIMIT 1",
           ).get(invoice.id) as { id: number } | undefined;
-          if (invoice.status !== "paid" || !Number.isFinite(invoiceRemaining) || invoiceRemaining > 0.01 || !invoicePosting) {
+          if (!Number.isFinite(invoiceRemaining) || invoiceRemaining > 0.01 || !invoicePosting) {
             throw new Error("لا يمكن إغلاق العقد قبل ترحيل جميع فواتيره وتسويتها بالكامل");
           }
         }
@@ -2947,6 +3080,9 @@ router.post("/admin/container-system/records", async (req, res) => {
     if (Number(contractPayload.customerRecordId) !== Number(sitePayload.customerRecordId)) {
       return res.status(409).json({ error: "موقع التخصيص لا يتبع عميل العقد" });
     }
+    if (!["active", "approved", "issued", "scheduled", "delivered"].includes(contract.status)) {
+      return res.status(409).json({ error: "لا يمكن تخصيص حاوية لعقد غير نشط" });
+    }
     if (!["available", "reserved"].includes(canonicalAssetStatus(asset.status, asset.status))) {
       return res.status(409).json({ error: "الحاوية ليست متاحة للتخصيص" });
     }
@@ -3034,43 +3170,139 @@ router.post("/admin/container-system/records", async (req, res) => {
       if (kind === "container_assignment") {
         const assetId = Number(payload.containerRecordId);
         const contractRecordId = Number(payload.contractRecordId);
-        const asset = tx.select().from(containerSystemRecordsTable).where(eq(containerSystemRecordsTable.id, assetId)).get();
-        if (!asset) throw new Error("أصل الحاوية غير موجود");
-        const contract = tx.select().from(containerSystemRecordsTable).where(eq(containerSystemRecordsTable.id, contractRecordId)).get();
-        if (!contract || contract.kind !== "contract" || contract.status === "archived") throw new Error("العقد المرتبط غير موجود أو مؤرشف");
+        const rows = tx.select().from(containerSystemRecordsTable).all();
+        const asset = rows.find(row =>
+          row.id === assetId &&
+          ["container", "container_asset"].includes(row.kind) &&
+          row.status !== "archived",
+        );
+        const contract = rows.find(row =>
+          row.id === contractRecordId &&
+          row.kind === "contract" &&
+          row.status !== "archived",
+        );
+        const site = rows.find(row =>
+          row.id === Number(payload.siteRecordId) &&
+          row.kind === "customer_site" &&
+          row.status !== "archived",
+        );
+        if (!asset || !contract || !site) throw new Error("العقد أو الحاوية أو موقع العميل غير موجود");
+        if (!["active", "approved", "issued", "scheduled", "delivered"].includes(contract.status)) {
+          throw new Error("لا يمكن تخصيص حاوية لعقد غير نشط");
+        }
+        const contractPayload = parsePayload(contract.payload);
+        const sitePayload = parsePayload(site.payload);
+        if (Number(contractPayload.customerRecordId) !== Number(sitePayload.customerRecordId)) {
+          throw new Error("موقع التخصيص لا يتبع عميل العقد");
+        }
+        if (!["available", "reserved"].includes(canonicalAssetStatus(asset.status, asset.status))) {
+          throw new Error("الحاوية ليست متاحة للتخصيص");
+        }
+        const activeAssignment = rows.find(row =>
+          row.id !== inserted.id &&
+          row.kind === "container_assignment" &&
+          row.status !== "archived" &&
+          ["reserved", "active"].includes(String(parsePayload(row.payload).assignmentStatus ?? row.status)) &&
+          Number(parsePayload(row.payload).containerRecordId) === assetId,
+        );
+        if (activeAssignment) throw new Error("الحاوية مرتبطة بتخصيص نشط بالفعل");
+        const now = new Date().toISOString();
         const nextAssetPayload = {
           ...parsePayload(asset.payload),
           status: "reserved",
           assignmentRecordId: inserted.id,
-          assignedContractRecordId: Number(payload.contractRecordId),
+          assignedContractRecordId: contractRecordId,
           assignedSiteRecordId: Number(payload.siteRecordId),
         };
-        const nextAssignmentPayload = {
+        const assignmentPayload = {
           ...payload,
           assignmentRecordId: inserted.id,
         };
-        tx.update(containerSystemRecordsTable).set({
+        const contractNumber = contractRecordNumber(contract);
+        const scheduleDate = String(payload.startDate ?? payload.scheduleDate ?? now.slice(0, 10)).slice(0, 10);
+        const scheduledAt = String(payload.scheduledAt ?? `${scheduleDate}T09:00:00`);
+        const workOrderNumber = `WO-${contractRecordId}-A${inserted.id}`;
+        const workOrderPayload = {
+          workOrderNumber,
+          customerRecordId: Number(contractPayload.customerRecordId) || null,
+          customerName: contractPayload.customerName ?? "",
+          customerPhone: contractPayload.customerPhone ?? "",
+          contractRecordId,
+          contractNumber,
+          containerRecordId: assetId,
+          containerCode: assetCodeOf(parsePayload(asset.payload)),
+          containerTypeId: parsePayload(asset.payload).containerTypeId ?? null,
+          siteRecordId: Number(payload.siteRecordId),
+          siteName: sitePayload.siteName ?? sitePayload.name ?? "",
+          location: sitePayload.address ?? sitePayload.location ?? contractPayload.location ?? "",
+          locationCoordinates: sitePayload.locationCoordinates ?? sitePayload.coordinates ?? null,
+          operationType: "DELIVER_CONTAINER",
+          serviceType: "تسليم حاوية",
+          assignmentRecordId: inserted.id,
+          startDate: scheduleDate,
+          scheduleDate,
+          scheduledAt,
+          appointmentType: "scheduled",
+          durationDays: Number(contractPayload.durationDays ?? 0) || null,
+          driverStatus: "unassigned",
+          status: "new",
+          source: "container_assignment",
+          notes: String(payload.notes ?? "تسليم حاوية مضافة إلى عقد قائم"),
+        };
+        const workOrder = tx.insert(containerSystemRecordsTable).values({
+          kind: "work_order",
+          status: "new",
+          reference: workOrderNumber,
+          payload: JSON.stringify(workOrderPayload),
+          createdBy: adminReq.adminId,
+        }).returning().get();
+        const nextAssignmentPayload = {
+          ...assignmentPayload,
+          workOrderRecordId: workOrder.id,
+          workOrderNumber,
+        };
+        current = tx.update(containerSystemRecordsTable).set({
           payload: JSON.stringify(nextAssignmentPayload),
-          updatedAt: new Date().toISOString(),
-        }).where(eq(containerSystemRecordsTable.id, inserted.id)).run();
+          updatedAt: now,
+        }).where(eq(containerSystemRecordsTable.id, inserted.id)).returning().get();
         tx.update(containerSystemRecordsTable).set({
           status: "reserved",
           payload: JSON.stringify(nextAssetPayload),
-          updatedAt: new Date().toISOString(),
+          updatedAt: now,
         }).where(eq(containerSystemRecordsTable.id, assetId)).run();
-        const contractPayload = parsePayload(contract.payload);
+        const primaryContainerId = Number(contractPayload.containerRecordId ?? contractPayload.assignedContainerRecordId ?? 0);
+        const containerAssignmentRecordIds = [...new Set([
+          ...(Array.isArray(contractPayload.containerAssignmentRecordIds)
+            ? contractPayload.containerAssignmentRecordIds.map(Number).filter(id => id > 0)
+            : []),
+          inserted.id,
+        ])];
+        const additionalContainerRecordIds = [...new Set([
+          ...(Array.isArray(contractPayload.additionalContainerRecordIds)
+            ? contractPayload.additionalContainerRecordIds.map(Number).filter(id => id > 0)
+            : []),
+          ...(primaryContainerId > 0 && primaryContainerId !== assetId ? [assetId] : []),
+        ])];
         const nextContractPayload = {
           ...contractPayload,
-          containerRecordId: assetId,
-          assignedContainerRecordId: assetId,
-          assignedSiteRecordId: Number(payload.siteRecordId),
-          containerCode: payload.containerCode,
-          assignmentRecordId: inserted.id,
-          assignmentStatus: "reserved",
+          containerAssignmentRecordIds,
+          additionalContainerRecordIds,
+          latestContainerAssignmentRecordId: inserted.id,
+          latestWorkOrderRecordId: workOrder.id,
+          ...(primaryContainerId <= 0
+            ? {
+                containerRecordId: assetId,
+                assignedContainerRecordId: assetId,
+                assignedSiteRecordId: Number(payload.siteRecordId),
+                containerCode: payload.containerCode,
+                assignmentRecordId: inserted.id,
+                assignmentStatus: "reserved",
+              }
+            : {}),
         };
         tx.update(containerSystemRecordsTable).set({
           payload: JSON.stringify(nextContractPayload),
-          updatedAt: new Date().toISOString(),
+          updatedAt: now,
         }).where(eq(containerSystemRecordsTable.id, contractRecordId)).run();
         tx.insert(containerSystemAuditTable).values({
           recordId: assetId, kind: asset.kind, action: "assignment_reserved",
@@ -3079,6 +3311,10 @@ router.post("/admin/container-system/records", async (req, res) => {
         tx.insert(containerSystemAuditTable).values({
           recordId: contractRecordId, kind: contract.kind, action: "assignment_reserved",
           beforePayload: contract.payload, afterPayload: JSON.stringify(nextContractPayload), actorId: adminReq.adminId,
+        }).run();
+        tx.insert(containerSystemAuditTable).values({
+          recordId: workOrder.id, kind: "work_order", action: "create",
+          afterPayload: JSON.stringify(workOrderPayload), actorId: adminReq.adminId,
         }).run();
       }
       if (kind === "container_movement") {

@@ -156,6 +156,54 @@ async function main() {
     invoiceStatus: "due",
     testData: true,
   });
+  const foreignCustomer = insertRecord("customer", "active", "TEST-FOREIGN-CUSTOMER-001", {
+    name: "TEST ONLY — عميل آخر",
+    phone: "0000000002",
+    testData: true,
+  });
+  const foreignContractNumber = "TEST-FOREIGN-CONTRACT-001";
+  const foreignContract = insertRecord("contract", "active", foreignContractNumber, {
+    contractNumber: foreignContractNumber,
+    customerRecordId: foreignCustomer.id,
+    customerName: "TEST ONLY — عميل آخر",
+    total: 100,
+    testData: true,
+  });
+  const foreignInvoice = insertRecord("invoice", "posted", "TEST-FOREIGN-INVOICE-001", {
+    invoiceNumber: "TEST-FOREIGN-INVOICE-001",
+    contractRecordId: foreignContract.id,
+    contractNumber: foreignContractNumber,
+    customerRecordId: foreignCustomer.id,
+    customerName: "TEST ONLY — عميل آخر",
+    amount: 100,
+    total: 100,
+    paid: 0,
+    remaining: 100,
+    date: "2026-08-10",
+    invoiceStatus: "due",
+    testData: true,
+  });
+  const assignmentPrimaryContainer = insertRecord("container_asset", "rented", "TEST-ASSIGNMENT-PRIMARY-001", {
+    assetCode: "TEST-ASSIGNMENT-PRIMARY-001",
+    status: "rented",
+    testData: true,
+  });
+  const assignmentTargetContainer = insertRecord("container_asset", "available", "TEST-ASSIGNMENT-NEW-001", {
+    assetCode: "TEST-ASSIGNMENT-NEW-001",
+    status: "available",
+    testData: true,
+  });
+  const assignmentContractNumber = "TEST-ASSIGNMENT-CONTRACT-001";
+  const assignmentContract = insertRecord("contract", "active", assignmentContractNumber, {
+    contractNumber: assignmentContractNumber,
+    customerRecordId: customer.id,
+    customerName: "عميل اختبار — لا يستخدم للتشغيل",
+    siteRecordId: site.id,
+    containerRecordId: assignmentPrimaryContainer.id,
+    containerCode: "TEST-ASSIGNMENT-PRIMARY-001",
+    total: 100,
+    testData: true,
+  });
   insertRecord("work_order", "completed", "TEST-WORK-ORDER-001", {
     contractRecordId: contract.id,
     contractNumber,
@@ -1321,6 +1369,27 @@ async function main() {
       .set({ status: "posted" })
       .where(eq(containerSystemRecordsTable.id, invoice.id))
       .run();
+    postToFinancialCore({
+      sourceKind: "invoice",
+      sourceId: foreignInvoice.id,
+      reference: foreignInvoice.reference,
+      amount: 100,
+      date: "2026-08-10",
+      createdBy: admin.id,
+    });
+    db.update(containerSystemRecordsTable)
+      .set({ status: "posted" })
+      .where(eq(containerSystemRecordsTable.id, foreignInvoice.id))
+      .run();
+    const foreignInvoiceSettlement = await settle("test-lifecycle-foreign-customer-invoice-001", foreignInvoice.id);
+    assert.equal(foreignInvoiceSettlement.status, 422, "a settlement must reject another customer's invoice");
+    const foreignInvoiceError = await foreignInvoiceSettlement.json() as { error?: string };
+    assert.equal(foreignInvoiceError.error, "الفاتورة لا تتبع العقد المحدد");
+    assert.equal(
+      (sqlite.prepare("SELECT COUNT(*) AS count FROM container_system_records WHERE kind = 'payment'").get() as { count: number }).count,
+      0,
+      "a cross-customer invoice rejection must not create a payment",
+    );
 
     const period = sqlite.prepare("UPDATE financial_periods SET status = 'closed' WHERE period_key = '2026-08'");
     period.run();
@@ -1367,6 +1436,66 @@ async function main() {
     const releasedContainer = db.select().from(containerSystemRecordsTable)
       .where(eq(containerSystemRecordsTable.id, container.id)).get();
     assert.equal(releasedContainer?.status, "available");
+
+    const assignmentOperationKey = "TEST-ADDITIONAL-CONTAINER-ASSIGNMENT-001";
+    const assignmentRequest = {
+      kind: "container_assignment",
+      status: "reserved",
+      payload: {
+        operationKey: assignmentOperationKey,
+        contractRecordId: assignmentContract.id,
+        siteRecordId: site.id,
+        containerRecordId: assignmentTargetContainer.id,
+        assignmentStatus: "reserved",
+        startDate: "2026-10-29",
+        notes: "TEST ONLY — حاوية إضافية لعقد قائم",
+      },
+    };
+    const assignmentResponse = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify(assignmentRequest),
+    });
+    assert.equal(assignmentResponse.status, 201, await assignmentResponse.clone().text());
+    const assignment = await assignmentResponse.json() as {
+      id: number;
+      payload: string | Record<string, unknown>;
+      operationKey?: string | null;
+    };
+    const assignmentPayload = typeof assignment.payload === "string"
+      ? JSON.parse(assignment.payload) as Record<string, unknown>
+      : assignment.payload;
+    assert.ok(Number(assignmentPayload.workOrderRecordId) > 0, "the new assignment must reference its work order");
+    const assignmentWorkOrders = db.select().from(containerSystemRecordsTable).all()
+      .filter(record => record.kind === "work_order")
+      .filter(record => Number((JSON.parse(record.payload) as Record<string, unknown>).assignmentRecordId) === assignment.id);
+    assert.equal(assignmentWorkOrders.length, 1, "the additional container must create exactly one work order");
+    const assignmentWorkOrderPayload = JSON.parse(assignmentWorkOrders[0].payload) as Record<string, unknown>;
+    assert.equal(assignmentWorkOrders[0].status, "new");
+    assert.equal(assignmentWorkOrderPayload.operationType, "DELIVER_CONTAINER");
+    assert.equal(assignmentWorkOrderPayload.driverStatus, "unassigned");
+    const updatedAssignmentContract = db.select().from(containerSystemRecordsTable)
+      .where(eq(containerSystemRecordsTable.id, assignmentContract.id)).get();
+    const updatedAssignmentContractPayload = JSON.parse(updatedAssignmentContract!.payload) as Record<string, unknown>;
+    assert.equal(updatedAssignmentContractPayload.containerRecordId, assignmentPrimaryContainer.id,
+      "assigning another container must preserve the contract's primary container");
+    assert.ok((updatedAssignmentContractPayload.additionalContainerRecordIds as number[]).includes(assignmentTargetContainer.id));
+    assert.equal(db.select().from(containerSystemRecordsTable)
+      .where(eq(containerSystemRecordsTable.id, assignmentTargetContainer.id)).get()?.status, "reserved");
+
+    const assignmentRetry = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify(assignmentRequest),
+    });
+    assert.equal(assignmentRetry.status, 200, "repeating an assignment request must be idempotent");
+    assert.equal((await assignmentRetry.json() as { idempotent: boolean }).idempotent, true);
+    assert.equal(
+      db.select().from(containerSystemRecordsTable).all()
+        .filter(record => record.kind === "work_order")
+        .filter(record => Number((JSON.parse(record.payload) as Record<string, unknown>).assignmentRecordId) === assignment.id).length,
+      1,
+    );
 
     const refundIds: number[] = [];
     for (let index = 1; index <= 3; index += 1) {

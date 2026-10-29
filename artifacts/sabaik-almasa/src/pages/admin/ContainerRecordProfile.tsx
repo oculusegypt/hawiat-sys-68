@@ -19,7 +19,7 @@ import {
   contractDisplayNumber,
   invoiceContractDisplayNumber,
   invoiceContractForRecord,
-  paymentAmountForInvoice,
+  invoiceNetPaidAmount,
 } from "@/lib/containerFinancialRelations"
 
 const API_BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") || ""
@@ -339,10 +339,7 @@ function InvoiceRows({
     const p = payloadOf(invoice)
     const linkedContract = invoiceContractForRecord(invoice, contracts)
     const total = Number(p.total ?? p.amount ?? 0)
-    const paid = canonicalCollections(payments).reduce(
-      (sum, payment) => sum + paymentAmountForInvoice(payment, invoice, records),
-      0,
-    )
+    const paid = invoiceNetPaidAmount(invoice, records)
     const remaining = Math.max(total - paid, 0)
     const number = text(p.invoiceNumber ?? invoice.reference)
     const status = remaining <= 0 && total > 0 ? "مدفوعة" : paid > 0 ? "مدفوعة جزئياً" : String(p.invoiceStatus ?? invoice.status) === "overdue" ? "متأخرة" : "مستحقة"
@@ -412,7 +409,9 @@ function CustomerProfile({ record, records }: { record: ContainerSystemRecord; r
     ? invoiceContractForRecord(paymentInvoice, contracts)
     : undefined
   const paymentInvoiceTotal = Number(paymentInvoicePayload.total ?? paymentInvoicePayload.amount ?? 0)
-  const paymentInvoicePaid = Number(paymentInvoicePayload.paid ?? 0)
+  const paymentInvoicePaid = paymentInvoice
+    ? invoiceNetPaidAmount(paymentInvoice, records)
+    : 0
   const paymentInvoiceRemaining = Math.max(paymentInvoiceTotal - paymentInvoicePaid, 0)
   useEffect(() => {
     if (paymentInvoice && action === null) setAction("payment")
