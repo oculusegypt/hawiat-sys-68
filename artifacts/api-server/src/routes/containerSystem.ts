@@ -1026,7 +1026,11 @@ async function validateContractPayload(payload: Record<string, unknown>, ignored
   }
 }
 
-async function validateFinancialPayload(kind: string, payload: Record<string, unknown>) {
+async function validateFinancialPayload(
+  kind: string,
+  payload: Record<string, unknown>,
+  ignoredRecordId?: number,
+) {
   if (["payment", "receipt", "expense", "deposit", "bank_deposit", "bank_fee", "invoice", "invoice_return", "payment_return", "transfer", "purchase", "purchase_return", "other_revenue"].includes(kind)) {
     const amount = Number(payload.amount ?? payload.total ?? 0);
     if (!Number.isFinite(amount) || amount <= 0) throw new Error("القيمة المالية يجب أن تكون أكبر من صفر");
@@ -1124,6 +1128,7 @@ async function validateFinancialPayload(kind: string, payload: Record<string, un
       const invoiceTotal = Number(invoicePayload.total ?? invoicePayload.amount ?? 0);
       const returned = records
         .filter(record => record.kind === "invoice_return" && isPosted(record))
+        .filter(record => record.id !== ignoredRecordId)
         .filter(record => String(parsePayload(record.payload).invoiceNumber ?? "").trim() === invoiceNumber)
         .reduce((sum, record) => sum + Number(parsePayload(record.payload).amount ?? 0), 0);
       if (Number.isFinite(invoiceTotal) && Number(payload.amount ?? 0) + returned > invoiceTotal) {
@@ -1141,6 +1146,7 @@ async function validateFinancialPayload(kind: string, payload: Record<string, un
         const originalAmount = Number(parsePayload(originalPayment.payload).amount ?? 0);
         const returned = records
           .filter(record => record.kind === "payment_return" && isPosted(record))
+          .filter(record => record.id !== ignoredRecordId)
           .filter(record => Number(parsePayload(record.payload).originalPaymentId ?? 0) === originalPaymentId)
           .reduce((sum, record) => sum + Number(parsePayload(record.payload).amount ?? 0), 0);
         if (Number.isFinite(originalAmount) && Number(payload.amount ?? 0) + returned > originalAmount + 0.01) {
@@ -1163,6 +1169,7 @@ async function validateFinancialPayload(kind: string, payload: Record<string, un
     const originalAmount = Number(parsePayload(originalPayment.payload).amount ?? 0);
     const returned = records
       .filter(record => record.kind === "payment_return" && isPosted(record))
+      .filter(record => record.id !== ignoredRecordId)
       .filter(record => Number(parsePayload(record.payload).originalPaymentId ?? 0) === originalPaymentId)
       .reduce((sum, record) => sum + Number(parsePayload(record.payload).amount ?? 0), 0);
     if (Number.isFinite(originalAmount) && Number(payload.amount ?? 0) + returned > originalAmount + 0.01) {
@@ -3252,6 +3259,19 @@ router.post("/admin/container-system/records", async (req, res) => {
         }
         const contractPayload = parsePayload(contract.payload);
         const sitePayload = parsePayload(site.payload);
+        const billingEnabled = !["false", "0", "no", "free", "non_billable"].includes(
+          String(contractPayload.billingEnabled ?? "true").trim().toLowerCase(),
+        );
+        const contractBillable = !["false", "0", "no", "free", "non_billable"].includes(
+          String(contractPayload.billable ?? "true").trim().toLowerCase(),
+        );
+        if (!billingEnabled || !contractBillable) {
+          throw new Error("العقد غير قابل للفوترة؛ لا يمكن إضافة حاوية إيجارية إليه");
+        }
+        const transactionUnitPrice = Number(payload.unitPrice);
+        if (!Number.isFinite(transactionUnitPrice) || transactionUnitPrice <= 0) {
+          throw new Error("سعر إيجار الحاوية لكل دورة فوترة مطلوب ويجب أن يكون أكبر من صفر");
+        }
         if (Number(contractPayload.customerRecordId) !== Number(sitePayload.customerRecordId)) {
           throw new Error("موقع التخصيص لا يتبع عميل العقد");
         }
@@ -3364,7 +3384,7 @@ router.post("/admin/container-system/records", async (req, res) => {
           ? enteredPrice
           : Math.round((amount + taxAmount) * 100) / 100;
         const billingFrequency = String(contractPayload.billingFrequency ?? "monthly");
-        const billingPeriod = scheduleDate.slice(0, 7);
+        const billingPeriod = billingFrequency === "monthly" ? scheduleDate.slice(0, 7) : scheduleDate;
         const assetTypeId = Number(liveAssetPayload.containerTypeId ?? liveAssetPayload.containerTypeRecordId ?? 0) || null;
         const assetTypeName = String(liveAssetPayload.typeName ?? liveAssetPayload.containerType ?? liveAssetPayload.size ?? "");
         const lineName = `إيجار حاوية ${assetCodeOf({ ...liveAssetPayload, reference: asset.reference })}${assetTypeName ? ` — ${assetTypeName}` : ""}`;
@@ -3504,8 +3524,20 @@ router.post("/admin/container-system/records", async (req, res) => {
           }),
           updatedAt: now,
         }).where(eq(containerSystemRecordsTable.id, inserted.id)).returning().get();
-        const previousAmount = Number(contractPayload.amount ?? 0);
-        const previousTax = Number(contractPayload.taxAmount ?? Math.max(Number(contractPayload.total ?? previousAmount) - previousAmount, 0));
+        const storedTotal = Number(contractPayload.total ?? contractPayload.amount ?? 0);
+        const hasStoredAmount = contractPayload.amount !== undefined &&
+          contractPayload.amount !== null &&
+          String(contractPayload.amount).trim() !== "";
+        const previousAmount = hasStoredAmount
+          ? Number(contractPayload.amount)
+          : taxEnabled && taxRate > 0
+            ? Math.round((storedTotal / (1 + taxRate / 100)) * 100) / 100
+            : storedTotal;
+        const previousTax = contractPayload.taxAmount !== undefined &&
+          contractPayload.taxAmount !== null &&
+          String(contractPayload.taxAmount).trim() !== ""
+          ? Number(contractPayload.taxAmount)
+          : Math.round(Math.max(storedTotal - previousAmount, 0) * 100) / 100;
         const previousTotal = Number(contractPayload.total ?? previousAmount + previousTax);
         const contractLineRecordIds = [...new Set([
           ...(Array.isArray(contractPayload.contractLineRecordIds)
@@ -3612,6 +3644,12 @@ router.post("/admin/container-system/records", async (req, res) => {
     if (message === "الحاوية مرتبطة بعقد آخر خلال نفس الفترة") {
       return res.status(409).json({ error: message });
     }
+      if (
+        message.startsWith("الفترة المالية ") ||
+        message === "لا يمكن ترحيل قيمة مالية غير موجبة"
+      ) {
+        return res.status(422).json({ error: message });
+      }
     return res.status(422).json({ error: "تعذر حفظ التخصيص بشكل كامل" });
   }
   if (kind === "contract") {
@@ -3789,7 +3827,7 @@ router.patch("/admin/container-system/records/:id", async (req, res) => {
     if (await hasDuplicateAssetCode(assetCode, id)) return res.status(409).json({ error: "رقم أصل الحاوية مستخدم مسبقًا" });
   }
   try {
-    await validateFinancialPayload(current.kind, nextPayload);
+    await validateFinancialPayload(current.kind, nextPayload, id);
   } catch (error) {
     return res.status(422).json({ error: "بيانات مالية غير صحيحة" });
   }

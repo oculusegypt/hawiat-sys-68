@@ -53,6 +53,17 @@ import { findOpenContainerOperation } from "@/lib/containerOperationState"
 
 const API_BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") || ""
 
+function apiErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object" && "data" in error) {
+    const data = (error as { data?: unknown }).data
+    if (data && typeof data === "object" && "error" in data) {
+      const message = (data as { error?: unknown }).error
+      if (typeof message === "string" && message.trim()) return message.trim()
+    }
+  }
+  return error instanceof Error && error.message.trim() ? error.message : fallback
+}
+
 function requestContextFromStorage(requestId: number | null): ServiceRequest | null {
   if (!requestId || typeof window === "undefined") return null
   try {
@@ -2775,8 +2786,8 @@ export default function ContainerSystem() {
         payload: { ...payload, operationKey: crypto.randomUUID() },
       },
     }, {
-      onSuccess: () => { invalidate(); setAssignmentWizardOpen(false); showSuccess("تم تخصيص الحاوية وربطها بالعقد والموقع وإنشاء أمر تشغيل للتسليم") },
-      onError: error => toast({ title: error instanceof Error ? error.message : "تعذر حفظ التخصيص", variant: "destructive" }),
+      onSuccess: () => { invalidate(); setAssignmentWizardOpen(false); showSuccess("تم تخصيص الحاوية وربطها بالعقد وإنشاء بند الإيجار والفاتورة التكميلية وأمر التسليم") },
+      onError: error => toast({ title: apiErrorMessage(error, "تعذر حفظ التخصيص"), variant: "destructive" }),
     })
   }
   const saveSettings = (payload: Record<string, unknown>) => {

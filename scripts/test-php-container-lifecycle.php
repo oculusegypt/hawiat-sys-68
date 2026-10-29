@@ -115,7 +115,48 @@ lifecycleExpectSame(null, hsContainerAssignmentError($pdo, [
     'contractRecordId' => $contractId,
     'containerRecordId' => $containerId,
     'siteRecordId' => $siteId,
+    'unitPrice' => 50,
 ]), 'PHP must accept an assignment when contract, asset, and site are eligible');
+lifecycleExpectSame('سعر إيجار الحاوية لكل دورة فوترة مطلوب ويجب أن يكون أكبر من صفر',
+    hsContainerAssignmentError($pdo, [
+        'contractRecordId' => $contractId,
+        'containerRecordId' => $containerId,
+        'siteRecordId' => $siteId,
+    ]),
+    'PHP must require a positive rental price for an additional container');
+$nonbillableContractId = $insertRecord('contract', 'active', 'TEST-ONLY-NONBILLABLE-CONTRACT-1', [
+    'contractNumber' => 'TEST-ONLY-NONBILLABLE-CONTRACT-1',
+    'customerRecordId' => $identifierCustomerId,
+    'billingEnabled' => false,
+]);
+lifecycleExpectSame('العقد غير قابل للفوترة؛ لا يمكن إضافة حاوية إيجارية إليه',
+    hsContainerAssignmentError($pdo, [
+        'contractRecordId' => $nonbillableContractId,
+        'containerRecordId' => $containerId,
+        'siteRecordId' => $siteId,
+        'unitPrice' => 50,
+    ]),
+    'PHP must reject additional rental assignments for non-billable contracts');
+$reservedAssetId = $insertRecord('container_asset', 'reserved', 'TEST-ONLY-RESERVED-ASSET-1', [
+    'assetCode' => 'TEST-ONLY-RESERVED-ASSET-1',
+    'status' => 'reserved',
+]);
+lifecycleExpectSame('الحاوية ليست متاحة للتخصيص', hsContainerAssignmentError($pdo, [
+    'contractRecordId' => $contractId,
+    'containerRecordId' => $reservedAssetId,
+    'siteRecordId' => $siteId,
+    'unitPrice' => 50,
+]), 'PHP must reject an already reserved container');
+$rentedAssetId = $insertRecord('container_asset', 'rented', 'TEST-ONLY-RENTED-ASSET-1', [
+    'assetCode' => 'TEST-ONLY-RENTED-ASSET-1',
+    'status' => 'rented',
+]);
+lifecycleExpectSame('الحاوية ليست متاحة للتخصيص', hsContainerAssignmentError($pdo, [
+    'contractRecordId' => $contractId,
+    'containerRecordId' => $rentedAssetId,
+    'siteRecordId' => $siteId,
+    'unitPrice' => 50,
+]), 'PHP must reject an already rented container');
 $foreignSiteId = $insertRecord('customer_site', 'active', 'TEST-ONLY-FOREIGN-SITE-1', [
     'customerRecordId' => $identifierCustomerId + 100,
     'name' => 'TEST ONLY — foreign site',
@@ -125,6 +166,7 @@ lifecycleExpectSame('موقع التخصيص لا يتبع عميل العقد',
     'contractRecordId' => $contractId,
     'containerRecordId' => $containerId,
     'siteRecordId' => $foreignSiteId,
+    'unitPrice' => 50,
 ]), 'PHP must reject an assignment site belonging to a different customer');
 lifecycleExpectSame('العقد وأصل الحاوية وموقع العميل مطلوبة للتخصيص', hsContainerAssignmentError($pdo, [
     'contractRecordId' => $contractId,
@@ -176,6 +218,7 @@ lifecycleExpectSame('الحاوية مرتبطة بتخصيص نشط بالفع�
     'contractRecordId' => $contractId,
     'containerRecordId' => $containerId,
     'siteRecordId' => $siteId,
+    'unitPrice' => 50,
 ]), 'PHP assignment validation must reject an asset with an existing active assignment');
 $manager = ['id' => 1, 'role' => 'manager'];
 

@@ -7,4 +7,4 @@ Treat `data/sabaik.db` as production data. For requested end-to-end tests, use t
 
 **Why:** The user wants tests to exercise the full system with actual admin and driver accounts while protecting the production-like database and credentials.
 
-**How to apply:** For role/auth coverage, use the named Replit secrets with the corresponding real accounts. For synthetic lifecycle or financial scenarios, use a consistent isolated SQLite copy, verify key counts before and after, clearly label test data, and remove the temporary copy after verification. Never put secret values in files, test output, or reports.
+**How to apply:** For role/auth coverage, use the named Replit secrets with the corresponding real accounts. For synthetic lifecycle or financial scenarios, use a unique temporary SQLite database; initialize a blank schema when fixtures expect no existing records, and use a consistent isolated copy only when production-shaped data is required. Clearly label synthetic data and remove temporary databases after verification. Never put secret values in files, test output, or reports.

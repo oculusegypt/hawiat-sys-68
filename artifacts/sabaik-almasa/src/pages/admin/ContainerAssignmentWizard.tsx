@@ -33,9 +33,30 @@ function suggestedRentalPrice(records: ContainerSystemRecord[], contractId: stri
     return Number.isFinite(price) && price > 0 &&
       (!assetTypeId || String(line.containerTypeId ?? line.containerTypeRecordId ?? "") === assetTypeId)
   })
+  const latestPricedLine = lines.find(record => Number(payloadOf(record).unitPrice ?? 0) > 0)
+  const primaryContainerId = Number(contractPayload.containerRecordId ?? contractPayload.assignedContainerRecordId ?? 0)
+  const assignedContainerIds = new Set([
+    ...(primaryContainerId > 0 ? [primaryContainerId] : []),
+    ...(Array.isArray(contractPayload.additionalContainerRecordIds)
+      ? contractPayload.additionalContainerRecordIds.map(Number).filter(id => id > 0)
+      : []),
+    ...records
+      .filter(record => record.kind === "container_assignment" && record.status !== "archived")
+      .filter(record => Number(payloadOf(record).contractRecordId) === contract.id)
+      .filter(record => ["reserved", "active"].includes(String(payloadOf(record).assignmentStatus ?? record.status).toLowerCase()))
+      .map(record => Number(payloadOf(record).containerRecordId))
+      .filter(id => id > 0),
+  ])
+  const contractAmount = Number(contractPayload.amount ?? contractPayload.total ?? 0)
+  const averagedContractRate = assignedContainerIds.size > 0 ? contractAmount / assignedContainerIds.size : 0
+  const contractUnitPrice = Number(contractPayload.unitPrice ?? 0)
+  const fallbackUnitPrice = Number.isFinite(contractUnitPrice) && contractUnitPrice > 0
+    ? contractUnitPrice
+    : averagedContractRate
   const rate = Number(
     matchingLine ? payloadOf(matchingLine).unitPrice
-      : contractPayload.unitPrice ?? contractPayload.amount ?? 0,
+      : latestPricedLine ? payloadOf(latestPricedLine).unitPrice
+        : fallbackUnitPrice,
   )
   return Number.isFinite(rate) && rate > 0 ? String(rate) : ""
 }

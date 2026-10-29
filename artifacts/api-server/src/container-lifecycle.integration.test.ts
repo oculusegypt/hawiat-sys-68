@@ -201,7 +201,12 @@ async function main() {
     siteRecordId: site.id,
     containerRecordId: assignmentPrimaryContainer.id,
     containerCode: "TEST-ASSIGNMENT-PRIMARY-001",
-    total: 100,
+    amount: 100,
+    taxAmount: 15,
+    taxRate: 15,
+    taxEnabled: true,
+    total: 115,
+    billingFrequency: "monthly",
     testData: true,
   });
   insertRecord("work_order", "completed", "TEST-WORK-ORDER-001", {
@@ -1477,14 +1482,106 @@ async function main() {
         contractRecordId: assignmentContract.id,
         siteRecordId: site.id,
         containerRecordId: assignmentTargetContainer.id,
+      unitPrice: 50,
         assignmentStatus: "reserved",
         startDate: "2026-10-29",
         notes: "TEST ONLY — حاوية إضافية لعقد قائم",
       },
     };
+  const assignmentUrl = `http://127.0.0.1:${port}/api/admin/container-system/records`;
+  const assignmentHeaders = { "content-type": "application/json", authorization };
+  const missingPricePayload: Record<string, unknown> = {
+    ...assignmentRequest.payload,
+    operationKey: "TEST-ASSIGNMENT-MISSING-PRICE-001",
+  };
+  delete missingPricePayload.unitPrice;
+  const missingPriceResponse = await fetch(assignmentUrl, {
+    method: "POST",
+    headers: assignmentHeaders,
+    body: JSON.stringify({ ...assignmentRequest, payload: missingPricePayload }),
+  });
+  assert.equal(missingPriceResponse.status, 422, "an additional rental assignment must require its own price");
+
+  for (const status of ["reserved", "rented"]) {
+    const unavailableAsset = insertRecord("container_asset", status, `TEST-ASSIGNMENT-${status.toUpperCase()}-001`, {
+      assetCode: `TEST-ASSIGNMENT-${status.toUpperCase()}-001`,
+      status,
+      testData: true,
+    });
+    const unavailableResponse = await fetch(assignmentUrl, {
+      method: "POST",
+      headers: assignmentHeaders,
+      body: JSON.stringify({
+        ...assignmentRequest,
+        payload: {
+          ...assignmentRequest.payload,
+          operationKey: `TEST-ASSIGNMENT-${status.toUpperCase()}-BLOCKED-001`,
+          containerRecordId: unavailableAsset.id,
+        },
+      }),
+    });
+    assert.equal(unavailableResponse.status, 409, `${status} containers must be rejected by the backend`);
+  }
+
+  const nonbillableContract = insertRecord("contract", "active", "TEST-ASSIGNMENT-NONBILLABLE-001", {
+    contractNumber: "TEST-ASSIGNMENT-NONBILLABLE-001",
+    customerRecordId: customer.id,
+    customerName: "عميل اختبار — لا يستخدم للتشغيل",
+    billingEnabled: false,
+    testData: true,
+  });
+  const nonbillableResponse = await fetch(assignmentUrl, {
+    method: "POST",
+    headers: assignmentHeaders,
+    body: JSON.stringify({
+      ...assignmentRequest,
+      payload: {
+        ...assignmentRequest.payload,
+        operationKey: "TEST-ASSIGNMENT-NONBILLABLE-001",
+        contractRecordId: nonbillableContract.id,
+      },
+    }),
+  });
+  assert.equal(nonbillableResponse.status, 422);
+  assert.equal((await nonbillableResponse.json() as { error: string }).error,
+    "العقد غير قابل للفوترة؛ لا يمكن إضافة حاوية إيجارية إليه");
+
+  const assignmentPeriod = new Date().toISOString().slice(0, 7);
+  const priorPeriod = sqlite.prepare("SELECT status FROM financial_periods WHERE period_key = ?")
+    .get(assignmentPeriod) as { status: string } | undefined;
+  const [periodYear, periodMonth] = assignmentPeriod.split("-").map(Number);
+  const periodEnd = new Date(Date.UTC(periodYear, periodMonth, 0)).toISOString().slice(0, 10);
+  sqlite.prepare("INSERT OR IGNORE INTO financial_periods (period_key, starts_on, ends_on, status) VALUES (?, ?, ?, 'open')")
+    .run(assignmentPeriod, `${assignmentPeriod}-01`, periodEnd);
+  sqlite.prepare("UPDATE financial_periods SET status = 'closed' WHERE period_key = ?").run(assignmentPeriod);
+  const closedPeriodResponse = await fetch(assignmentUrl, {
+    method: "POST",
+    headers: assignmentHeaders,
+    body: JSON.stringify({
+      ...assignmentRequest,
+      payload: { ...assignmentRequest.payload, operationKey: "TEST-ASSIGNMENT-CLOSED-PERIOD-001" },
+    }),
+  });
+  assert.equal(closedPeriodResponse.status, 422);
+  assert.equal((await closedPeriodResponse.json() as { error: string }).error,
+    `الفترة المالية ${assignmentPeriod} مغلقة؛ سجّل تسوية رسمية في فترة مفتوحة`);
+  assert.equal(
+    (sqlite.prepare("SELECT COUNT(*) AS count FROM container_system_records WHERE kind = 'container_assignment' AND operation_key = ?")
+      .get("TEST-ASSIGNMENT-CLOSED-PERIOD-001") as { count: number }).count,
+    0,
+    "a rejected invoice posting must roll back the assignment",
+  );
+  assert.equal(db.select().from(containerSystemRecordsTable)
+    .where(eq(containerSystemRecordsTable.id, assignmentTargetContainer.id)).get()?.status, "available");
+  if (priorPeriod) {
+    sqlite.prepare("UPDATE financial_periods SET status = ? WHERE period_key = ?").run(priorPeriod.status, assignmentPeriod);
+  } else {
+    sqlite.prepare("DELETE FROM financial_periods WHERE period_key = ?").run(assignmentPeriod);
+  }
+
     const assignmentResponse = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records`, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization },
+    headers: assignmentHeaders,
       body: JSON.stringify(assignmentRequest),
     });
     assert.equal(assignmentResponse.status, 201, await assignmentResponse.clone().text());
@@ -1511,8 +1608,33 @@ async function main() {
     assert.equal(updatedAssignmentContractPayload.containerRecordId, assignmentPrimaryContainer.id,
       "assigning another container must preserve the contract's primary container");
     assert.ok((updatedAssignmentContractPayload.additionalContainerRecordIds as number[]).includes(assignmentTargetContainer.id));
+    assert.equal(updatedAssignmentContractPayload.amount, 150);
+    assert.equal(updatedAssignmentContractPayload.taxAmount, 22.5);
+    assert.equal(updatedAssignmentContractPayload.total, 172.5);
     assert.equal(db.select().from(containerSystemRecordsTable)
       .where(eq(containerSystemRecordsTable.id, assignmentTargetContainer.id)).get()?.status, "reserved");
+    const assignmentLineId = Number(assignmentPayload.contractLineRecordId);
+    const assignmentInvoiceId = Number(assignmentPayload.invoiceRecordId);
+    const assignmentLine = db.select().from(containerSystemRecordsTable)
+      .where(eq(containerSystemRecordsTable.id, assignmentLineId)).get();
+    const assignmentLinePayload = JSON.parse(assignmentLine!.payload) as Record<string, unknown>;
+    assert.equal(assignmentLine?.kind, "contract_line");
+    assert.equal(assignmentLinePayload.unitPrice, 50);
+    assert.equal(assignmentLinePayload.billingFrequency, "monthly");
+    const assignmentInvoice = db.select().from(containerSystemRecordsTable)
+      .where(eq(containerSystemRecordsTable.id, assignmentInvoiceId)).get();
+    const assignmentInvoicePayload = JSON.parse(assignmentInvoice!.payload) as Record<string, unknown>;
+    assert.equal(assignmentInvoice?.kind, "invoice");
+    assert.equal(assignmentInvoicePayload.contractRecordId, assignmentContract.id);
+    assert.equal(assignmentInvoicePayload.assignmentRecordId, assignment.id);
+    assert.equal(assignmentInvoicePayload.total, 57.5);
+    assert.equal((assignmentInvoicePayload.lineItems as Array<Record<string, unknown>>)[0].contractLineRecordId, assignmentLineId);
+    assert.equal(
+      (sqlite.prepare("SELECT COUNT(*) AS count FROM financial_transactions WHERE source_kind = 'invoice' AND source_id = ?")
+        .get(assignmentInvoiceId) as { count: number }).count,
+      1,
+      "the supplemental invoice must post to the financial core",
+    );
 
     const assignmentRetry = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records`, {
       method: "POST",
@@ -1572,12 +1694,13 @@ async function main() {
     const invoiceAfterRefunds = db.select().from(containerSystemRecordsTable)
       .where(eq(containerSystemRecordsTable.id, invoice.id)).get();
     const invoiceAfterRefundsPayload = JSON.parse(invoiceAfterRefunds!.payload) as Record<string, unknown>;
-    const expectedPaidAfterRefunds = Math.max(50 - postedRefundTotal, 0);
+    const expectedPaidAfterRefunds = Math.max(100 - postedRefundTotal, 0);
+    const actualPaidAfterRefunds = Number(invoiceAfterRefundsPayload.paid);
     const expectedInvoiceStatusAfterRefunds = expectedPaidAfterRefunds <= 0.01
       ? "due"
       : expectedPaidAfterRefunds >= 99.99 ? "paid" : "partially_paid";
-    assert.ok(Math.abs(Number(invoiceAfterRefundsPayload.paid) - expectedPaidAfterRefunds) < 0.01,
-      "posting a payment return must synchronize the stored invoice paid amount");
+    assert.ok(Math.abs(actualPaidAfterRefunds - expectedPaidAfterRefunds) < 0.01,
+      `posting a payment return must synchronize the stored invoice paid amount (actual ${actualPaidAfterRefunds}, expected ${expectedPaidAfterRefunds}, returns ${postedRefundTotal})`);
     assert.ok(Math.abs(Number(invoiceAfterRefundsPayload.remaining) - (100 - expectedPaidAfterRefunds)) < 0.01,
       "posting a payment return must synchronize the stored invoice remaining amount");
     assert.equal(invoiceAfterRefunds?.status, expectedInvoiceStatusAfterRefunds);
@@ -1597,7 +1720,7 @@ async function main() {
       const invoiceAfterRefundCancellation = db.select().from(containerSystemRecordsTable)
         .where(eq(containerSystemRecordsTable.id, invoice.id)).get();
       const invoiceAfterRefundCancellationPayload = JSON.parse(invoiceAfterRefundCancellation!.payload) as Record<string, unknown>;
-      const expectedPaidAfterRefundCancellation = Math.max(50 - remainingPostedRefundTotal, 0);
+      const expectedPaidAfterRefundCancellation = Math.max(100 - remainingPostedRefundTotal, 0);
       assert.ok(Math.abs(Number(invoiceAfterRefundCancellationPayload.paid) - expectedPaidAfterRefundCancellation) < 0.01,
         "cancelling a payment return must restore the stored invoice paid amount");
       assert.ok(Math.abs(Number(invoiceAfterRefundCancellationPayload.remaining) - (100 - expectedPaidAfterRefundCancellation)) < 0.01,
