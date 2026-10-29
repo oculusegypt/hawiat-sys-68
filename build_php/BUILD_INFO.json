@@ -1,9 +1,9 @@
 {
   "buildType": "full-hostinger-archive",
-  "builtAt": "2026-10-29T16:32:41.319Z",
+  "builtAt": "2026-10-29T17:36:44.285Z",
   "sourceDatabase": "data/sabaik.db",
   "tableCounts": {
-    "active_visitors": 6,
+    "active_visitors": 9,
     "admins": 12,
     "ads": 1,
     "bank_reconciliations": 0,
@@ -22,7 +22,7 @@
     "messages": 0,
     "notifications": 4,
     "packages": 5,
-    "page_views": 6832,
+    "page_views": 6841,
     "partners": 6,
     "posts": 71,
     "push_subscriptions": 2,
