@@ -128,56 +128,6 @@ export function FinancialControlCenter({
   let returnTotal = returns.reduce((sum, record) => sum + financialAmount(record), 0)
   let depositTotal = deposits.reduce((sum, record) => sum + financialAmount(record), 0)
   let reconciliationDifference = depositTotal - collected
-  const paidForContract = (contract: ContainerSystemRecord) => {
-    const p = financialPayload(contract)
-    const number = String(p.contractNumber ?? contract.reference)
-    const collected = payments.reduce((sum, payment) => {
-      const pp = financialPayload(payment)
-      const allocation = Array.isArray(pp.allocations)
-        ? pp.allocations.find(item => Number((item as Record<string, unknown>).contractId) === contract.id)
-        : null
-      if (allocation) return sum + Number((allocation as Record<string, unknown>).amount ?? 0)
-      return !Array.isArray(pp.allocations) && String(pp.contractNumber ?? "") === number ? sum + Number(pp.amount ?? 0) : sum
-    }, 0)
-    const refunded = scoped.filter(item => item.kind === "payment_return").reduce((sum, refund) => {
-      const rp = financialPayload(refund)
-      if (Number(rp.contractRecordId ?? rp.contractId ?? 0) === contract.id || String(rp.contractNumber ?? "") === number) return sum + financialAmount(refund)
-      const allocation = Array.isArray(rp.allocations)
-        ? rp.allocations.find(item => Number((item as Record<string, unknown>).contractId) === contract.id)
-        : null
-      if (allocation) return sum + Number((allocation as Record<string, unknown>).amount ?? 0)
-      const originalPaymentId = Number(rp.originalPaymentId ?? 0)
-      if (originalPaymentId > 0) {
-        const originalPayment = payments.find(item => item.id === originalPaymentId)
-        if (originalPayment) {
-          const opp = financialPayload(originalPayment)
-          const originalAllocation = Array.isArray(opp.allocations)
-            ? opp.allocations.find(item => Number((item as Record<string, unknown>).contractId) === contract.id)
-            : null
-          if (originalAllocation) return sum + financialAmount(refund)
-          if (!Array.isArray(opp.allocations) && String(opp.contractNumber ?? "") === number) return sum + financialAmount(refund)
-        }
-      }
-      const originalInvoiceId = Number(rp.originalInvoiceId ?? rp.invoiceRecordId ?? 0)
-      if (originalInvoiceId > 0) {
-        const originalInvoice = invoices.find(item => item.id === originalInvoiceId)
-        if (originalInvoice) {
-          const oip = financialPayload(originalInvoice)
-          if (Number(oip.contractRecordId ?? 0) === contract.id || String(oip.contractNumber ?? "") === number) {
-            return sum + financialAmount(refund)
-          }
-        }
-      }
-      return sum
-    }, 0)
-    return collected - refunded
-  }
-  const receivables = contracts.reduce((sum, record) => {
-    const payload = financialPayload(record)
-    const total = Number(payload.total ?? payload.amount ?? 0)
-    const paid = paidForContract(record)
-    return sum + Math.max((Number.isFinite(total) ? total : 0) - (Number.isFinite(paid) ? paid : 0), 0)
-  }, 0)
    const paymentReturns = returns.filter(record => record.kind === "payment_return").reduce((sum, record) => sum + financialAmount(record), 0)
    const netCash = collected - expenseTotal - paymentReturns
    const ledger = truth?.totals

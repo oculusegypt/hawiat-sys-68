@@ -19,6 +19,7 @@ import {
   contractDisplayNumber,
   invoiceContractDisplayNumber,
   invoiceContractForRecord,
+  paymentAmountForInvoice,
 } from "@/lib/containerFinancialRelations"
 
 const API_BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") || ""
@@ -65,31 +66,6 @@ const canonicalCollections = (records: ContainerSystemRecord[]) => {
       return !payload.sourcePaymentId && !paymentKeys.has(collectionKey(record))
     }),
   ]
-}
-const allocatedAmount = (record: ContainerSystemRecord, key: "contractId" | "invoiceId", id: number) => {
-  const allocations = payloadOf(record).allocations
-  if (!Array.isArray(allocations)) return 0
-  return allocations.reduce((sum, entry) => {
-    const allocation = entry as Record<string, unknown>
-    return Number(allocation[key]) === id ? sum + Number(allocation.amount ?? 0) : sum
-  }, 0)
-}
-const collectionAmountForInvoice = (record: ContainerSystemRecord, invoice: ContainerSystemRecord) => {
-  const payload = payloadOf(record)
-  const invoicePayload = payloadOf(invoice)
-  const allocated = allocatedAmount(record, "invoiceId", invoice.id)
-  if (allocated > 0) return allocated
-  if (Array.isArray(payload.allocations)) return 0
-  const directInvoiceId = Number(payload.invoiceRecordId ?? payload.invoiceId ?? 0)
-  if (directInvoiceId > 0) return directInvoiceId === invoice.id ? Number(payload.amount ?? 0) : 0
-  const paymentCustomerId = Number(payload.customerRecordId ?? 0)
-  const invoiceCustomerId = Number(invoicePayload.customerRecordId ?? 0)
-  if (paymentCustomerId > 0 && invoiceCustomerId > 0 && paymentCustomerId !== invoiceCustomerId) return 0
-  const paymentInvoiceNumber = text(payload.invoiceNumber, "")
-  const invoiceNumber = text(invoicePayload.invoiceNumber ?? invoice.reference, "")
-  return paymentInvoiceNumber && invoiceNumber && paymentInvoiceNumber === invoiceNumber
-    ? Number(payload.amount ?? 0)
-    : 0
 }
 const customerSiteBelongsTo = (site: ContainerSystemRecord, customer: ContainerSystemRecord) => {
   const sitePayload = payloadOf(site)
@@ -351,17 +327,22 @@ function InvoiceRows({
   invoices,
   payments,
   contracts,
+  records,
 }: {
   invoices: ContainerSystemRecord[]
   payments: ContainerSystemRecord[]
   contracts: ContainerSystemRecord[]
+  records: ContainerSystemRecord[]
 }) {
   const [, navigate] = useLocation()
   return <Card className="border-cyan-100 shadow-sm"><CardHeader className="border-b border-slate-100 px-5 py-4"><div className="flex items-center justify-between gap-3"><CardTitle className="text-base">الفواتير</CardTitle><span className="rounded-full bg-cyan-50 px-2.5 py-1 text-xs font-black text-cyan-800">{invoices.length}</span></div></CardHeader><CardContent className="p-0">{invoices.length === 0 ? <p className="p-8 text-center text-sm text-slate-500">لا توجد فواتير مرتبطة بهذا العميل.</p> : invoices.map(invoice => {
     const p = payloadOf(invoice)
     const linkedContract = invoiceContractForRecord(invoice, contracts)
     const total = Number(p.total ?? p.amount ?? 0)
-    const paid = canonicalCollections(payments).reduce((sum, payment) => sum + collectionAmountForInvoice(payment, invoice), 0)
+    const paid = canonicalCollections(payments).reduce(
+      (sum, payment) => sum + paymentAmountForInvoice(payment, invoice, records),
+      0,
+    )
     const remaining = Math.max(total - paid, 0)
     const number = text(p.invoiceNumber ?? invoice.reference)
     const status = remaining <= 0 && total > 0 ? "مدفوعة" : paid > 0 ? "مدفوعة جزئياً" : String(p.invoiceStatus ?? invoice.status) === "overdue" ? "متأخرة" : "مستحقة"
@@ -853,7 +834,7 @@ function CustomerProfile({ record, records }: { record: ContainerSystemRecord; r
        </Card>
      </div>
 
-      <InvoiceRows invoices={invoices} payments={payments.filter(item => item.kind === "payment" && item.status === "posted")} contracts={contracts} />
+      <InvoiceRows invoices={invoices} payments={payments.filter(item => item.kind === "payment" && item.status === "posted")} contracts={contracts} records={records} />
 
      <div className="grid gap-5 xl:grid-cols-2">
        <Card className="border-slate-200/80 shadow-sm">

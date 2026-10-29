@@ -168,4 +168,63 @@ expectSame(1, (int)$identityPdo->query("SELECT COUNT(*) FROM container_system_re
         hsFinancialPostingInvariantIssue($identityPdo, 'invoice_return', ['invoiceNumber' => $invoiceNumber, 'amount' => 40], $pendingInvoiceReturnId),
         'PHP must permit an invoice return within the remaining balance');
 
-echo "PHP financial-method and initial-status assertions passed\n";
+$contractA = [
+    'id' => 41,
+    'kind' => 'contract',
+    'reference' => 'RNT-41',
+    'payload' => json_encode(['customerRecordId' => 22, 'contractNumber' => 'RNT-41'], JSON_UNESCAPED_UNICODE),
+];
+$contractB = [
+    'id' => 42,
+    'kind' => 'contract',
+    'reference' => 'RNT-42',
+    'payload' => ['customerRecordId' => 33, 'contractNumber' => 'RNT-42'],
+];
+$invoiceA = [
+    'id' => 71,
+    'kind' => 'invoice',
+    'reference' => 'INV-71',
+    'payload' => json_encode([
+        'customerRecordId' => 22,
+        'contractRecordId' => 41,
+        'contractNumber' => 'RNT-41',
+        'invoiceNumber' => 'INV-DUP',
+    ], JSON_UNESCAPED_UNICODE),
+];
+$invoiceB = [
+    'id' => 72,
+    'kind' => 'invoice',
+    'reference' => 'INV-72',
+    'payload' => [
+        'customerRecordId' => 33,
+        'contractRecordId' => 42,
+        'contractNumber' => 'RNT-42',
+        'invoiceNumber' => 'INV-DUP',
+    ],
+];
+$relationRecords = [$contractA, $contractB, $invoiceA, $invoiceB];
+expectSame(true, hsInvoiceBelongsToContract($invoiceA, $contractA),
+    'PHP must match an invoice to its explicit contract and customer');
+expectSame(false, hsInvoiceBelongsToContract($invoiceA, $contractB),
+    'PHP must not match an invoice to another customer contract');
+$mismatchedInvoice = $invoiceA;
+$mismatchedInvoice['payload'] = ['customerRecordId' => 33, 'contractRecordId' => 41, 'contractNumber' => 'RNT-41'];
+expectSame(false, hsInvoiceBelongsToContract($mismatchedInvoice, $contractA),
+    'PHP must reject a customer mismatch even when an invoice has a direct contract ID');
+$legacyPayment = [
+    'id' => 81,
+    'kind' => 'payment',
+    'payload' => [
+        'customerRecordId' => 22,
+        'invoiceNumber' => 'INV-DUP',
+        'allocations' => [['invoiceId' => 71, 'amount' => 45]],
+    ],
+];
+expectSame(true, hsRecordReferencesContract($legacyPayment, $contractA, $relationRecords),
+    'PHP must resolve invoice allocations to the invoice owner contract');
+expectSame(false, hsRecordReferencesContract($legacyPayment, $contractB, $relationRecords),
+    'PHP must not count an invoice allocation against another customer contract');
+expectSame(45, (int)(hsFinancialAllocationForContract($legacyPayment, $contractA, $relationRecords)['amount'] ?? 0),
+    'PHP must preserve the amount allocated through an invoice ID');
+
+echo "PHP financial-method, invoice-relationship, and initial-status assertions passed\n";

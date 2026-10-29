@@ -9,20 +9,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   contractDisplayNumber,
   invoiceContractForRecord,
+  paymentAmountForInvoice,
 } from "@/lib/containerFinancialRelations"
 
 const money = (value: number) => `${value.toLocaleString("ar-SA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ر.س`
 const payloadOf = (record?: ContainerSystemRecord) => (record?.payload ?? {}) as Record<string, unknown>
 const value = (input: unknown, fallback = "غير مسجل") => String(input ?? "").trim() || fallback
 const dateOnly = (input: unknown) => value(input, "—").slice(0, 10)
-const allocatedAmount = (record: ContainerSystemRecord, invoiceId: number) => {
-  const allocations = payloadOf(record).allocations
-  if (!Array.isArray(allocations)) return 0
-  return allocations.reduce((sum, entry) => {
-    const allocation = entry as Record<string, unknown>
-    return Number(allocation.invoiceId) === invoiceId ? sum + Number(allocation.amount ?? 0) : sum
-  }, 0)
-}
 function statusInfo(status: string, total: number, paid: number, dueDate: string) {
   if (status === "cancelled") return { label: "ملغاة", className: "border-rose-200 bg-rose-50 text-rose-800" }
   if (total > 0 && paid >= total) return { label: "مدفوعة", className: "border-emerald-200 bg-emerald-50 text-emerald-800" }
@@ -53,24 +46,14 @@ export default function InvoicePrintPage() {
     ? invoiceContractForRecord(record, records.filter(item => item.kind === "contract"))
     : undefined
   const site = records.find(item => item.kind === "customer_site" && item.id === Number(p.siteRecordId))
-  const payments = records.filter(item => {
-    if (item.kind !== "payment" || item.status !== "posted") return false
-    const payment = payloadOf(item)
-    if (Array.isArray(payment.allocations)) return allocatedAmount(item, id) > 0
-    const directInvoiceId = Number(payment.invoiceRecordId ?? payment.invoiceId ?? 0)
-    if (directInvoiceId > 0) return directInvoiceId === id
-    const paymentCustomerId = Number(payment.customerRecordId ?? 0)
-    const invoiceCustomerId = Number(p.customerRecordId ?? 0)
-    if (paymentCustomerId > 0 && invoiceCustomerId > 0 && paymentCustomerId !== invoiceCustomerId) return false
-    const paymentInvoiceNumber = value(payment.invoiceNumber, "")
-    const invoiceNumber = value(p.invoiceNumber ?? record?.reference, "")
-    return Boolean(paymentInvoiceNumber && invoiceNumber && paymentInvoiceNumber === invoiceNumber)
-  })
-  const paid = payments.reduce((sum, item) => {
-    const payment = payloadOf(item)
-    const allocated = allocatedAmount(item, id)
-    return sum + (allocated > 0 ? allocated : Number(payment.amount ?? 0))
-  }, 0)
+  const payments = record
+    ? records.filter(item =>
+        item.kind === "payment" && paymentAmountForInvoice(item, record, records) > 0,
+      )
+    : []
+  const paid = record
+    ? payments.reduce((sum, item) => sum + paymentAmountForInvoice(item, record, records), 0)
+    : 0
   const subtotal = Number(p.subtotal ?? p.amount ?? 0)
   const tax = Number(p.taxAmount ?? 0)
   const total = Number(p.total ?? subtotal + tax)
