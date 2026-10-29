@@ -19,14 +19,14 @@ content_type = "application/octet-stream"
 id = "8wpwjJWk2KepEi0Yl7z6j"
 uri = "file://hawiat-sys-hostinger.zip"
 type = "unspecified"
-title = "حزمة هوستنجر — hawiat-sys-hostinger.zip"
-description = "حزمة البناء النهائية بعد اجتياز فحوص الأرشيف وSEO وPHP. تحتوي لقطة قاعدة الإنتاج؛ تعامل معها كملف سري."
+title = "حزمة Hostinger"
+description = "الأرشيف النهائي لمنصة CleanFlow، مع قاعدة بيانات المعاينة الحالية وتحديثات العقود وأوامر العمل وموقع الحاوية."
 logical_id = "990d3da6-af4c-4a74-b7a3-c0ec0ef58ac0"
-content_hash = "sha256:77759abe8f5cc5d332e924412d67f1df82f9459297b46c77480e6e90cebc9043"
-size = 19840228
-mtime_ms = 1791761126271
-storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:c72c350c-8f04-42ac-bdaf-f02d6ecface3/990d3da6-af4c-4a74-b7a3-c0ec0ef58ac0/13c47bf4-419e-4920-a55b-bb302db438c3"
-storage_version_token = "1791761280713589"
+content_hash = "sha256:421cff685349653e56e5080baee80518cded3a45c379ae4e04b2d53211b09db7"
+size = 19837595
+mtime_ms = 1793261833226
+storage_uri = "gcs://replit-rams-assets-janeway/rams/assets/repl:64be7139-6756-4360-b50b-bb60c8e099c1/990d3da6-af4c-4a74-b7a3-c0ec0ef58ac0/1deda019-59ef-48b2-b4a7-12988efcce5e"
+storage_version_token = "1793261947478215"
 content_type = "application/octet-stream"
 
 [[outputs]]

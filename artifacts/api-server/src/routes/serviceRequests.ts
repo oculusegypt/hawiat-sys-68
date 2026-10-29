@@ -377,6 +377,13 @@ function syncContainerCompletion(
           ...currentAssetPayload,
           status: assetStatus,
           location: request.location,
+          currentLocation: request.location || currentAssetPayload.currentLocation || currentAssetPayload.location,
+          currentLocationStatus: "at_destination",
+          currentLocationUpdatedAt: now,
+          currentLocationLat: request.driverLocationLat ? Number(request.driverLocationLat) : null,
+          currentLocationLng: request.driverLocationLng ? Number(request.driverLocationLng) : null,
+          transitWorkOrderId: null,
+          transitContractRecordId: null,
           lastMovementAt: now,
           lastWorkOrderId: request.id,
         };
@@ -1596,6 +1603,59 @@ router.patch("/driver/work-orders/:id", requireAdmin, requireDriver, async (req,
           updatedAt: now,
         }).where(eq(containerSystemRecordsTable.id, id)).returning().get();
         if (!next) throw new Error("تعذر تحديث أمر العمل");
+        if (
+          nextStatus === "en_route" &&
+          classifyContainerOperation(currentPayload.operationType ?? currentPayload.serviceType) === "DELIVER_CONTAINER"
+        ) {
+          const containerIds = Array.isArray(currentPayload.containerRecordIds)
+            ? [...new Set(currentPayload.containerRecordIds.map(Number).filter(value => Number.isInteger(value) && value > 0))]
+            : [Number(currentPayload.containerRecordId ?? 0)].filter(value => Number.isInteger(value) && value > 0);
+          const contractIds = Array.isArray(currentPayload.contractRecordIds)
+            ? currentPayload.contractRecordIds.map(Number).filter(value => Number.isInteger(value) && value > 0)
+            : [Number(currentPayload.contractRecordId ?? 0)].filter(value => Number.isInteger(value) && value > 0);
+          if (containerIds.length === 0) throw new Error("أمر التسليم لا يرتبط بحاوية");
+          const destination = String(currentPayload.location ?? "").trim() || "موقع التسليم";
+          const latitudeText = String(nextPayload.driverLocationLat ?? "").trim();
+          const longitudeText = String(nextPayload.driverLocationLng ?? "").trim();
+          const latitude = Number(nextPayload.driverLocationLat);
+          const longitude = Number(nextPayload.driverLocationLng);
+          const hasValidGps = latitudeText !== "" && longitudeText !== "" &&
+            Number.isFinite(latitude) && latitude >= -90 && latitude <= 90 &&
+            Number.isFinite(longitude) && longitude >= -180 && longitude <= 180;
+          const currentLocation = hasValidGps
+            ? `في الطريق إلى ${destination} (GPS: ${latitude}, ${longitude})`
+            : `في الطريق إلى ${destination}`;
+          for (const [index, containerId] of containerIds.entries()) {
+            const assetRow = tx.select().from(containerSystemRecordsTable)
+              .where(eq(containerSystemRecordsTable.id, containerId)).get();
+            if (!assetRow || !["container", "container_asset"].includes(assetRow.kind) || assetRow.status === "archived") {
+              throw new Error("حاوية أمر التسليم غير موجودة");
+            }
+            const assetPayload = parseContainerPayload(assetRow.payload);
+            const nextAssetPayload = {
+              ...assetPayload,
+              currentLocation,
+              currentLocationStatus: "in_transit",
+              currentLocationUpdatedAt: now,
+              currentLocationLat: hasValidGps ? latitude : null,
+              currentLocationLng: hasValidGps ? longitude : null,
+              transitWorkOrderId: id,
+              transitContractRecordId: contractIds[index] ?? (Number(currentPayload.contractRecordId ?? 0) || null),
+            };
+            tx.update(containerSystemRecordsTable).set({
+              payload: JSON.stringify(nextAssetPayload),
+              updatedAt: now,
+            }).where(eq(containerSystemRecordsTable.id, containerId)).run();
+            tx.insert(containerSystemAuditTable).values({
+              recordId: containerId,
+              kind: assetRow.kind,
+              action: "work_order_transit_sync",
+              beforePayload: assetRow.payload,
+              afterPayload: JSON.stringify(nextAssetPayload),
+              actorId: adminRequest.adminId,
+            }).run();
+          }
+        }
         if (nextStatus === "completed" && transactionCompletion) {
           syncContainerCompletion(tx, operationalRecordAsWorkOrder(next), transactionCompletion, adminRequest.adminId);
         }

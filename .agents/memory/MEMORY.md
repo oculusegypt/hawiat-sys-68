@@ -25,3 +25,4 @@
 - [Merged work-order identity](merged-work-order-identity.md) — service requests and work orders have independent ID spaces; qualify merged-list actions with record type.
 - [Production-like demo identity safety](demo-identity-safety.md) — unverified phones must not link or overwrite existing profiles; isolate tests and merge only after explicit review.
 - [Production-like database testing](production-like-db-testing.md) — use Replit secrets for real admin/driver login tests; keep synthetic business-data tests isolated.
+- [Contract issuance and live location](contract-issuance-live-location.md) — manual pricing defaults, waste-only identifiers, one dispatch task, and a distinct current-location field.

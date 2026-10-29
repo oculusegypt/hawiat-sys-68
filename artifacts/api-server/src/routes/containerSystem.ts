@@ -136,7 +136,23 @@ const CONTAINER_CATEGORY_ALIASES: Record<string, string> = {
 
 function canonicalContainerCategory(value: unknown) {
   const normalized = String(value ?? "").trim().toLowerCase();
-  return CONTAINER_CATEGORY_ALIASES[normalized] ?? normalized;
+  const aliased = CONTAINER_CATEGORY_ALIASES[normalized];
+  if (aliased) return aliased;
+  if (/waste|نفايات|مكبس/.test(normalized)) return "waste";
+  if (/debris|أنقاض|مخلفات بناء|هدم/.test(normalized)) return "debris";
+  if (/contract|نظافة|تنظيف/.test(normalized)) return "contract";
+  return normalized;
+}
+
+async function contractCategoryFromPayload(payload: Record<string, unknown>) {
+  const typeId = Number(payload.containerTypeId ?? payload.containerTypeRecordId ?? 0);
+  if (Number.isInteger(typeId) && typeId > 0) {
+    const type = await db.select().from(containersTable).where(eq(containersTable.id, typeId)).get();
+    if (type) return canonicalContainerCategory(type.category);
+  }
+  return canonicalContainerCategory(
+    payload.category ?? payload.classification ?? payload.categoryName ?? payload.contractCategory ?? payload.contractType,
+  );
 }
 
 function normalizedContainerValue(value: unknown) {
@@ -663,6 +679,7 @@ async function validateContractPayload(payload: Record<string, unknown>, ignored
     throw new Error("الحاوية المرتبطة بالعقد غير موجودة");
   }
   if (["active", "issued", "scheduled", "delivered"].includes(lifecycleStatus)) {
+    const requiresBusinessIdentifiers = await contractCategoryFromPayload(payload) === "waste";
     const customerRecordId = Number(payload.customerRecordId);
     const siteRecordId = Number(payload.siteRecordId);
     if (!Number.isInteger(customerRecordId) || customerRecordId <= 0) {
@@ -681,27 +698,29 @@ async function validateContractPayload(payload: Record<string, unknown>, ignored
     if (site && Number(parsePayload(site.payload).customerRecordId) !== customerRecordId) {
       throw new Error("موقع العقد لا يتبع العميل المحدد");
     }
-    const customerPayload = parsePayload(customer.payload);
-    const firstNonEmpty = (...values: unknown[]) => values
-      .map(value => String(value ?? "").trim())
-      .find(Boolean) ?? "";
-    const commercialRegistration = firstNonEmpty(
-      payload.customerCommercialRegistration,
-      payload.commercialRegistration,
-      customerPayload.commercialRegistration,
-      customerPayload.commercialRegistrationNumber,
-      customerPayload.crNumber,
-      customerPayload.registrationNumber,
-    );
-    const taxNumber = firstNonEmpty(
-      payload.customerTaxNumber,
-      payload.taxNumber,
-      customerPayload.taxNumber,
-      customerPayload.vatNumber,
-      customerPayload.taxId,
-    );
-    if (!commercialRegistration) throw new Error("السجل التجاري للعميل مطلوب عند إنشاء العقد");
-    if (!taxNumber) throw new Error("الرقم الضريبي للعميل مطلوب عند إنشاء العقد");
+    if (requiresBusinessIdentifiers) {
+      const customerPayload = parsePayload(customer.payload);
+      const firstNonEmpty = (...values: unknown[]) => values
+        .map(value => String(value ?? "").trim())
+        .find(Boolean) ?? "";
+      const commercialRegistration = firstNonEmpty(
+        payload.customerCommercialRegistration,
+        payload.commercialRegistration,
+        customerPayload.commercialRegistration,
+        customerPayload.commercialRegistrationNumber,
+        customerPayload.crNumber,
+        customerPayload.registrationNumber,
+      );
+      const taxNumber = firstNonEmpty(
+        payload.customerTaxNumber,
+        payload.taxNumber,
+        customerPayload.taxNumber,
+        customerPayload.vatNumber,
+        customerPayload.taxId,
+      );
+      if (!commercialRegistration) throw new Error("السجل التجاري للعميل مطلوب لعقود النفايات");
+      if (!taxNumber) throw new Error("الرقم الضريبي للعميل مطلوب لعقود النفايات");
+    }
   }
   if (await hasOverlappingContract(payload, ignoredId)) {
     throw new Error("الحاوية مرتبطة بعقد آخر خلال نفس الفترة");
@@ -1516,6 +1535,7 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
     ? activeContainerTypes.find(item => item.id === requestedTypeId)
     : undefined;
   const isAssetlessContract = workflowContainerType?.category === "contract";
+  if (workflowContainerType) applyContainerTypePayload(contractPayload, workflowContainerType);
   if (!Number.isInteger(customerId) || customerId <= 0 || (!isAssetlessContract && (!Number.isInteger(assetId) || assetId <= 0))) {
     return res.status(422).json({ error: isAssetlessContract ? "العميل مطلوب لإنشاء عقد النظافة" : "العميل وأصل الحاوية مطلوبان لإنشاء دورة العقد" });
   }
@@ -1637,12 +1657,29 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
           .where(eq(containerSystemRecordsTable.id, customerId))
           .run();
       }
-      if (!customerCommercialRegistration) throw new Error("السجل التجاري للعميل مطلوب عند إنشاء العقد");
-      if (!customerTaxNumber) throw new Error("الرقم الضريبي للعميل مطلوب عند إنشاء العقد");
-      contractPayload.customerCommercialRegistration = customerCommercialRegistration;
-      contractPayload.commercialRegistration = customerCommercialRegistration;
-      contractPayload.customerTaxNumber = customerTaxNumber;
-      contractPayload.taxNumber = customerTaxNumber;
+      const requiresBusinessIdentifiers = (contractContainerType?.category ?? canonicalContainerCategory(
+        contractPayload.category ?? contractPayload.classification ?? contractPayload.categoryName ?? contractPayload.contractType,
+      )) === "waste";
+      if (requiresBusinessIdentifiers && !customerCommercialRegistration) {
+        throw new Error("السجل التجاري للعميل مطلوب لعقود النفايات");
+      }
+      if (requiresBusinessIdentifiers && !customerTaxNumber) {
+        throw new Error("الرقم الضريبي للعميل مطلوب لعقود النفايات");
+      }
+      if (customerCommercialRegistration) {
+        contractPayload.customerCommercialRegistration = customerCommercialRegistration;
+        contractPayload.commercialRegistration = customerCommercialRegistration;
+      } else {
+        delete contractPayload.customerCommercialRegistration;
+        delete contractPayload.commercialRegistration;
+      }
+      if (customerTaxNumber) {
+        contractPayload.customerTaxNumber = customerTaxNumber;
+        contractPayload.taxNumber = customerTaxNumber;
+      } else {
+        delete contractPayload.customerTaxNumber;
+        delete contractPayload.taxNumber;
+      }
       if (!isAssetlessContract && asset) {
         const assetAvailability = canonicalAssetStatus(assetPayload.status ?? asset.status, asset.status);
         if (!["available", "reserved", "active"].includes(assetAvailability)) throw new Error("الحاوية ليست متاحة للتخصيص");

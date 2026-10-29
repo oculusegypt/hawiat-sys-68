@@ -42,6 +42,33 @@ $insertRecord = static function (string $kind, string $status, string $reference
     return (int)$pdo->lastInsertId();
 };
 
+$identifierCustomerId = $insertRecord('customer', 'active', 'TEST-ONLY-CUSTOMER-ID-1', [
+    'name' => 'TEST ONLY — no real customer',
+]);
+lifecycleExpectSame(null, hsContractBusinessIdentifierError($pdo, [
+    'classification' => 'debris',
+    'customerRecordId' => $identifierCustomerId,
+]), 'debris contracts must not require customer commercial identifiers');
+lifecycleExpectSame('السجل التجاري للعميل مطلوب لعقود النفايات', hsContractBusinessIdentifierError($pdo, [
+    'classification' => 'waste',
+    'customerRecordId' => $identifierCustomerId,
+]), 'waste contracts must require the customer commercial registration');
+$pdo->prepare("UPDATE container_system_records SET payload = ? WHERE id = ?")
+    ->execute([json_encode(['commercialRegistration' => 'TEST-ONLY-CR'], JSON_UNESCAPED_UNICODE), $identifierCustomerId]);
+lifecycleExpectSame('الرقم الضريبي للعميل مطلوب لعقود النفايات', hsContractBusinessIdentifierError($pdo, [
+    'classification' => 'waste',
+    'customerRecordId' => $identifierCustomerId,
+]), 'waste contracts must require the customer tax number');
+$pdo->prepare("UPDATE container_system_records SET payload = ? WHERE id = ?")
+    ->execute([json_encode([
+        'commercialRegistration' => 'TEST-ONLY-CR',
+        'taxNumber' => 'TEST-ONLY-TAX',
+    ], JSON_UNESCAPED_UNICODE), $identifierCustomerId]);
+lifecycleExpectSame(null, hsContractBusinessIdentifierError($pdo, [
+    'classification' => 'waste',
+    'customerRecordId' => $identifierCustomerId,
+]), 'waste contracts must accept both customer identifiers when present');
+
 $containerId = $insertRecord('container_asset', 'available', 'TEST-ONLY-ASSET-1', [
     'assetCode' => 'TEST-ONLY-ASSET-1',
     'status' => 'available',

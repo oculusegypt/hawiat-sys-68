@@ -1396,7 +1396,7 @@ function ContainerPOS({ records, onDetails, onEdit, onDelete, onAdd }: { records
             const payload = record.payload as Record<string, unknown>
             const code = String(payload.assetCode ?? payload.code ?? record.reference ?? `حاوية ${record.id}`)
             const customer = String(payload.customerName ?? payload.contractCustomer ?? "متاحة في المستودع")
-            const location = String(payload.location ?? "الموقع غير محدد")
+            const location = String(payload.currentLocation ?? payload.location ?? "الموقع غير محدد")
             const nextEmptying = String(payload.emptyingDate ?? payload.nextEmptyingDate ?? payload.endDate ?? "")
             return <div key={record.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md" data-testid={`pos-container-${record.id}`}>
               <div className="relative flex aspect-[2/1] items-center justify-center overflow-hidden bg-slate-950/5">
@@ -2104,7 +2104,7 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
     ["الطول", containerPayload.length],
     ["العرض", containerPayload.width],
     ["الارتفاع", containerPayload.height],
-    ["الموقع الحالي", containerPayload.location],
+    ["الموقع الحالي", containerPayload.currentLocation ?? containerPayload.location],
     ["آخر فحص", containerPayload.lastInspection],
     ["سجل التخصيص", relatedRecordValue(containerPayload.assignmentRecordId)],
     ["سجل العقد", relatedRecordValue(containerPayload.assignedContractRecordId ?? latestContract?.id)],
@@ -2154,7 +2154,7 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
                 <p className="mt-2 text-3xl font-black tracking-tight text-white" dir="ltr">{containerCode}</p>
                 <p className="mt-2 text-sm font-bold text-slate-300">{String(containerPayload.typeName ?? containerPayload.containerType ?? "نوع الحاوية غير محدد")}</p>
                 <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  <div className="rounded-2xl border border-white/10 bg-white/10 p-3"><p className="text-[10px] font-bold text-slate-400">الموقع الحالي</p><p className="mt-1 truncate text-sm font-black text-white">{String(containerPayload.location ?? "غير محدد")}</p></div>
+                  <div className="rounded-2xl border border-white/10 bg-white/10 p-3"><p className="text-[10px] font-bold text-slate-400">الموقع الحالي</p><p className="mt-1 truncate text-sm font-black text-white">{String(containerPayload.currentLocation ?? containerPayload.location ?? "غير محدد")}</p></div>
                   <div className="rounded-2xl border border-white/10 bg-white/10 p-3"><p className="text-[10px] font-bold text-slate-400">آخر فحص</p><p className="mt-1 text-sm font-black text-white">{String(containerPayload.lastInspection ?? "غير مسجل")}</p></div>
                   <div className="rounded-2xl border border-white/10 bg-white/10 p-3"><p className="text-[10px] font-bold text-slate-400">العقود والتخصيصات</p><p className="mt-1 text-xl font-black text-cyan-300">{containerContracts}</p></div>
                   <div className="rounded-2xl border border-white/10 bg-white/10 p-3"><p className="text-[10px] font-bold text-slate-400">الحركات التشغيلية</p><p className="mt-1 text-xl font-black text-cyan-300">{containerMovements}</p></div>
@@ -2178,7 +2178,7 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
                 </div>
                 <div className="text-left text-[11px] text-slate-500">
                   <span className="block font-bold text-slate-700">المسؤولية المسجلة</span>
-                  {linkedCustomerName !== "غير مرتبط بعميل" ? linkedCustomerName : String(containerPayload.location ?? "لا يوجد مسؤول أو موقع مرتبط")}
+                  {linkedCustomerName !== "غير مرتبط بعميل" ? linkedCustomerName : String(containerPayload.currentLocation ?? containerPayload.location ?? "لا يوجد مسؤول أو موقع مرتبط")}
                 </div>
               </div>
               <div className="rounded-2xl border border-slate-200 bg-[#f7faf9] p-4" aria-label="مراحل دورة الحاوية">

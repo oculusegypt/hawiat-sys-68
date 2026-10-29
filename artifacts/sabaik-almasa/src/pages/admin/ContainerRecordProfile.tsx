@@ -815,7 +815,7 @@ function CustomerProfile({ record, records }: { record: ContainerSystemRecord; r
        </Card>
        <Card className="border-slate-200/80 shadow-sm">
          <CardHeader className="border-b border-slate-100 px-5 py-4"><div className="flex items-center justify-between gap-3"><CardTitle className="flex items-center gap-2 text-base"><Truck size={17} className="text-cyan-800" /> الحاويات المرتبطة</CardTitle><Badge variant="outline">{containers.length}</Badge></div></CardHeader>
-         <CardContent className="p-4">{containers.length === 0 ? <p className="p-5 text-center text-sm text-slate-500">لا توجد حاويات مخصصة حاليًا.</p> : <div className="space-y-3">{containers.map(container => { const containerPayload = payloadOf(container); return <div key={container.id} data-testid={`card-customer-container-${container.id}`} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-100 bg-slate-50/60 p-4"><div><p className="font-black text-slate-900" dir="ltr">{text(containerPayload.assetCode ?? containerPayload.containerCode ?? container.reference)}</p><p className="mt-1 text-xs text-slate-500">{text(containerPayload.typeName ?? containerPayload.containerType, "حاوية")} · {text(containerPayload.location, "الموقع غير محدد")}</p></div><Badge className="bg-cyan-50 text-cyan-800 hover:bg-cyan-50">{profileStatus(container.status)}</Badge></div> })}</div>}</CardContent>
+          <CardContent className="p-4">{containers.length === 0 ? <p className="p-5 text-center text-sm text-slate-500">لا توجد حاويات مخصصة حاليًا.</p> : <div className="space-y-3">{containers.map(container => { const containerPayload = payloadOf(container); return <div key={container.id} data-testid={`card-customer-container-${container.id}`} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-100 bg-slate-50/60 p-4"><div><p className="font-black text-slate-900" dir="ltr">{text(containerPayload.assetCode ?? containerPayload.containerCode ?? container.reference)}</p><p className="mt-1 text-xs text-slate-500">{text(containerPayload.typeName ?? containerPayload.containerType, "حاوية")} · {text(containerPayload.currentLocation ?? containerPayload.location, "الموقع غير محدد")}</p></div><Badge className="bg-cyan-50 text-cyan-800 hover:bg-cyan-50">{profileStatus(container.status)}</Badge></div> })}</div>}</CardContent>
        </Card>
      </div>
 
@@ -974,7 +974,7 @@ function ContainerProfile({ record, records }: { record: ContainerSystemRecord; 
     customerName={text(customerPayload.name ?? customerPayload.customerName ?? activeContractPayload.customerName, "العميل")}
     phone={text(customerPayload.phone ?? customerPayload.mobile ?? activeContractPayload.customerPhone, "")}
     email={text(customerPayload.email, "")}
-    location={text(p.location ?? activeContractPayload.location ?? activeContractPayload.address, "يحدد لاحقاً")}
+    location={text(p.currentLocation ?? p.location ?? activeContractPayload.location ?? activeContractPayload.address, "يحدد لاحقاً")}
     contracts={activeContract ? [activeContract] : []}
     containers={[record]}
     records={records}
@@ -997,7 +997,7 @@ function ContainerProfile({ record, records }: { record: ContainerSystemRecord; 
               <h1 className="mt-3 text-3xl font-black tracking-tight" dir="ltr">{code}</h1>
               <p className="mt-2 text-sm font-bold text-slate-300">{text(p.typeName ?? p.containerType, "حاوية نفايات")} · {text(p.size ?? p.capacity, "الحجم غير محدد")}</p>
               <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-400">
-                <span className="flex items-center gap-1.5"><MapPin size={13} className="text-cyan-300" /> {text(p.location, "الموقع غير محدد")}</span>
+                <span className="flex items-center gap-1.5"><MapPin size={13} className="text-cyan-300" /> {text(p.currentLocation ?? p.location, "الموقع غير محدد")}</span>
                 <span className="flex items-center gap-1.5"><CalendarDays size={13} className="text-cyan-300" /> آخر تحديث {formatRecordDate(record.updatedAt)}</span>
               </div>
             </div>
@@ -1012,7 +1012,7 @@ function ContainerProfile({ record, records }: { record: ContainerSystemRecord; 
 
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
       <ContainerMetric label="الحالة الحالية" value={formatStatus(String(currentStatus))} tone="text-cyan-800" icon={<CheckCircle2 size={16} />} />
-      <ContainerMetric label="الموقع الحالي" value={text(p.location, "غير محدد")} icon={<MapPin size={16} />} />
+      <ContainerMetric label="الموقع الحالي" value={text(p.currentLocation ?? p.location, "غير محدد")} icon={<MapPin size={16} />} />
       <ContainerMetric label="عدد الحركات" value={movements.length} icon={<Truck size={16} />} />
       <ContainerMetric label="العقود المرتبطة" value={contracts.length} icon={<FileText size={16} />} />
       <ContainerMetric label="أوامر العمل" value={workOrders.length + operationalWorkOrders.length} tone="text-amber-700" icon={<Wrench size={16} />} />
@@ -1047,7 +1047,7 @@ function ContainerProfile({ record, records }: { record: ContainerSystemRecord; 
           <CardContent className="grid gap-2 p-4 sm:grid-cols-2 xl:grid-cols-1">
             <div className="rounded-2xl bg-slate-50 p-3"><p className="text-[10px] font-bold text-slate-400">العميل الحالي</p><p className="mt-1 text-sm font-black text-slate-800">{text(customerPayload.name ?? customerPayload.customerName ?? activeContractPayload.customerName, "غير مرتبط")}</p></div>
             <div className="rounded-2xl bg-slate-50 p-3"><p className="text-[10px] font-bold text-slate-400">العقد النشط</p><p className="mt-1 text-sm font-black text-slate-800">{text(activeContractPayload.contractNumber ?? activeContract?.reference, "لا يوجد عقد نشط")}</p></div>
-            <div className="rounded-2xl bg-slate-50 p-3"><p className="text-[10px] font-bold text-slate-400">الموقع التشغيلي</p><p className="mt-1 text-sm font-black text-slate-800">{text(activeContractPayload.location ?? p.location, "غير محدد")}</p></div>
+            <div className="rounded-2xl bg-slate-50 p-3"><p className="text-[10px] font-bold text-slate-400">الموقع التشغيلي</p><p className="mt-1 text-sm font-black text-slate-800">{text(p.currentLocation ?? activeContractPayload.location ?? p.location, "غير محدد")}</p></div>
           </CardContent>
         </Card>
       </div>
@@ -1099,7 +1099,11 @@ export function ContractPrintPage() {
   const customerCommercialRegistration = text(p.customerCommercialRegistration ?? p.commercialRegistration ?? p.customerCrNumber)
   const customerTaxNumber = text(p.customerTaxNumber ?? p.taxNumber ?? p.customerVatNumber)
   const organization = (query.data as typeof query.data & { organization?: Record<string, unknown> })?.organization ?? {}
-  const organizationName = text(organization.name ?? organization.englishName, "اسم المنشأة غير مضبوط")
+   const organizationName = [
+     organization.name,
+     organization.companyName,
+     organization.englishName,
+   ].map(value => String(value ?? "").trim()).find(Boolean) ?? "اسم المنشأة غير مضبوط"
   const organizationPhone = text(organization.phone ?? organization.whatsapp, "غير مسجل")
   const organizationAddress = [organization.address, organization.city, organization.region].map(value => text(value, "")).filter(Boolean).join("، ")
    const defaultClauses = ["يلتزم الطرف الأول بتوفير الحاوية وتسليمها إلى الموقع المحدد في العقد، وتنفيذ خدمات النقل والتفريغ المتفق عليها.","يلتزم الطرف الثاني بالمحافظة على الحاوية وعدم نقلها أو استخدامها لغير الغرض المتفق عليه دون موافقة الطرف الأول.","تحتسب قيمة العقد والضريبة وأي خدمات إضافية وفق البيانات المالية المثبتة في هذا المستند.","يتحمل الطرف الثاني أي أضرار ناتجة عن سوء الاستخدام أو تجاوز الوزن أو تعبئة مواد غير مسموحة.","تسجل كل عملية تسليم أو تبديل أو تفريغ أو استرجاع في النظام وترتبط بهذا العقد.","يلتزم الطرف الثاني بسداد المستحقات في مواعيدها، ويحق للطرف الأول تعليق الخدمة عند التأخر وفق سياسة المؤسسة.","أي تعديل على هذا العقد لا يكون نافذًا إلا بعد اعتماده وتسجيله كتابيًا من الطرفين."]

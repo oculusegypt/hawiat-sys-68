@@ -7103,6 +7103,41 @@ try {
                     ':updated_at' => $now,
                     ':id' => $id,
                 ]);
+                $operationText = strtoupper(trim((string)($freshPayload['operationType'] ?? ''))) . ' ' .
+                    (string)($freshPayload['serviceType'] ?? '') . ' ' . (string)($freshPayload['notes'] ?? '');
+                $isDelivery = (bool)preg_match('/تسليم|توصيل|deliver|delivery|drop[\s-]?off/i', $operationText) &&
+                    !preg_match('/تفريغ|empty|unload|استرجاع|سحب|رفع|pickup|return|withdraw/i', $operationText);
+                if ($nextStatus === 'en_route' && $isDelivery) {
+                    $destination = trim((string)($freshPayload['location'] ?? '')) ?: 'موقع التسليم';
+                    $latitudeText = trim((string)($nextPayload['driverLocationLat'] ?? ''));
+                    $longitudeText = trim((string)($nextPayload['driverLocationLng'] ?? ''));
+                    $latitude = $latitudeText !== '' && is_numeric($latitudeText) ? (float)$latitudeText : null;
+                    $longitude = $longitudeText !== '' && is_numeric($longitudeText) ? (float)$longitudeText : null;
+                    $hasValidGps = $latitude !== null && $latitude >= -90 && $latitude <= 90 &&
+                        $longitude !== null && $longitude >= -180 && $longitude <= 180;
+                    $currentLocation = $hasValidGps
+                        ? "في الطريق إلى {$destination} (GPS: {$latitude}, {$longitude})"
+                        : "في الطريق إلى {$destination}";
+                    foreach ($containerIds as $index => $containerRecordId) {
+                        $transitAssetStmt = $pdo->prepare("SELECT * FROM container_system_records WHERE id = :id AND kind IN ('container', 'container_asset') AND status <> 'archived' LIMIT 1");
+                        $transitAssetStmt->execute([':id' => $containerRecordId]);
+                        $transitAsset = $transitAssetStmt->fetch(PDO::FETCH_ASSOC);
+                        if (!$transitAsset) throw new RuntimeException('حاوية أمر التسليم غير موجودة', 422);
+                        $transitAssetPayload = json_decode((string)$transitAsset['payload'], true) ?: [];
+                        $transitAssetPayload['currentLocation'] = $currentLocation;
+                        $transitAssetPayload['currentLocationStatus'] = 'in_transit';
+                        $transitAssetPayload['currentLocationUpdatedAt'] = $now;
+                        $transitAssetPayload['currentLocationLat'] = $hasValidGps ? $latitude : null;
+                        $transitAssetPayload['currentLocationLng'] = $hasValidGps ? $longitude : null;
+                        $transitAssetPayload['transitWorkOrderId'] = $id;
+                        $transitAssetPayload['transitContractRecordId'] = $contractIds[$index] ?? ($freshContractId > 0 ? $freshContractId : null);
+                        $transitAssetJson = json_encode($transitAssetPayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                        $pdo->prepare("UPDATE container_system_records SET payload = :payload, updated_at = :updated_at WHERE id = :id")
+                            ->execute([':payload' => $transitAssetJson, ':updated_at' => $now, ':id' => $containerRecordId]);
+                        hsAudit($pdo, (int)$containerRecordId, (string)$transitAsset['kind'], 'work_order_transit_sync',
+                            (string)$transitAsset['payload'], $transitAssetJson, $driverId);
+                    }
+                }
                 if ($nextStatus === 'completed' && $hasFreshContainerWork) {
                     $movementType = (string)($freshPayload['movementType'] ?? ($isReturn ? 'استرجاع' : ($isEmptying ? 'تفريغ' : 'تسليم')));
                     $operationKey = trim((string)($freshPayload['operationKey'] ?? '')) ?: 'service-request-' . $id;
@@ -7120,6 +7155,13 @@ try {
                             ]);
                             $assetPayload['status'] = $isReturn ? 'available' : 'rented';
                             $assetPayload['location'] = $freshPayload['location'] ?? ($assetPayload['location'] ?? '');
+                            $assetPayload['currentLocation'] = $freshPayload['location'] ?? ($assetPayload['currentLocation'] ?? $assetPayload['location'] ?? '');
+                            $assetPayload['currentLocationStatus'] = 'at_destination';
+                            $assetPayload['currentLocationUpdatedAt'] = $now;
+                            $assetPayload['currentLocationLat'] = $nextPayload['driverLocationLat'] ?? null;
+                            $assetPayload['currentLocationLng'] = $nextPayload['driverLocationLng'] ?? null;
+                            $assetPayload['transitWorkOrderId'] = null;
+                            $assetPayload['transitContractRecordId'] = null;
                             $assetPayload['lastMovementAt'] = $now;
                         } else {
                             $assetPayload['lastEmptyingAt'] = $now;

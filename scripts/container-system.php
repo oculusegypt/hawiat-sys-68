@@ -844,6 +844,55 @@ function hsContractHasOverlappingDates(PDO $pdo, array $payload, ?int $ignoreId 
     return false;
 }
 
+function hsContractCategory(array $payload): string {
+    $values = [
+        $payload['category'] ?? '',
+        $payload['classification'] ?? '',
+        $payload['categoryName'] ?? '',
+        $payload['contractCategory'] ?? '',
+        $payload['contractType'] ?? '',
+    ];
+    foreach ($values as $value) {
+        $normalized = mb_strtolower(trim((string)$value));
+        if (preg_match('/waste|نفايات|مكبس/u', $normalized)) return 'waste';
+        if (preg_match('/debris|أنقاض|مخلفات بناء|هدم/u', $normalized)) return 'debris';
+        if (preg_match('/contract|نظافة|تنظيف/u', $normalized)) return 'contract';
+    }
+    return '';
+}
+
+function hsContractBusinessIdentifierError(PDO $pdo, array $payload): ?string {
+    if (hsContractCategory($payload) !== 'waste') return null;
+    $customerId = (int)($payload['customerRecordId'] ?? 0);
+    $customerPayload = [];
+    foreach (hsFindRecords($pdo, 'customer') as $candidate) {
+        if ((int)$candidate['id'] === $customerId && $candidate['status'] !== 'archived') {
+            $customerPayload = hsPayload($candidate['payload']);
+            break;
+        }
+    }
+    $commercialRegistration = trim((string)(
+        $payload['customerCommercialRegistration'] ??
+        $payload['commercialRegistration'] ??
+        $customerPayload['commercialRegistration'] ??
+        $customerPayload['commercialRegistrationNumber'] ??
+        $customerPayload['crNumber'] ??
+        $customerPayload['registrationNumber'] ??
+        ''
+    ));
+    $taxNumber = trim((string)(
+        $payload['customerTaxNumber'] ??
+        $payload['taxNumber'] ??
+        $customerPayload['taxNumber'] ??
+        $customerPayload['vatNumber'] ??
+        $customerPayload['taxId'] ??
+        ''
+    ));
+    if ($commercialRegistration === '') return 'السجل التجاري للعميل مطلوب لعقود النفايات';
+    if ($taxNumber === '') return 'الرقم الضريبي للعميل مطلوب لعقود النفايات';
+    return null;
+}
+
 function hsHasActiveContainerAssignment(PDO $pdo, int $containerId): bool {
     foreach (hsFindRecords($pdo) as $row) {
         if (($row['kind'] ?? '') !== 'container_assignment' || ($row['status'] ?? '') === 'archived') continue;
@@ -989,6 +1038,8 @@ function hsValidateRecord(PDO $pdo, string $kind, array $payload, ?int $ignoreId
             hsJson(['error' => 'العقد التشغيلي يجب أن يرتبط بحاوية'], 422);
         }
         if ($code && !hsFindAsset($pdo, $code)) hsJson(['error' => 'الحاوية المرتبطة بالعقد غير موجودة'], 422);
+        $businessIdentifierError = hsContractBusinessIdentifierError($pdo, $payload);
+        if ($businessIdentifierError !== null) hsJson(['error' => $businessIdentifierError], 422);
     }
     $numberFields = ['contract' => 'contractNumber', 'invoice' => 'invoiceNumber', 'receipt' => 'receiptNumber'];
     if (isset($numberFields[$kind])) {
@@ -1569,6 +1620,30 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
 
     if ($path === '/admin/container-system' && $method === 'GET') {
         $records = array_map('hsRecord', hsFindRecords($pdo));
+        $organizationSettings = [];
+        $settingStmt = $pdo->query("SELECT key, value FROM site_settings WHERE key IN (
+            'company_name', 'company_name_en', 'company_logo', 'company_phone_call',
+            'company_phone_whatsapp', 'company_email', 'company_address', 'company_city',
+            'company_region', 'company_country', 'company_postal_code', 'company_tax_number'
+        )");
+        foreach ($settingStmt->fetchAll(PDO::FETCH_ASSOC) as $setting) {
+            $organizationSettings[(string)$setting['key']] = (string)($setting['value'] ?? '');
+        }
+        $organization = [
+            'name' => trim($organizationSettings['company_name'] ?? '') ?: trim($organizationSettings['company_name_en'] ?? ''),
+            'companyName' => trim($organizationSettings['company_name'] ?? '') ?: trim($organizationSettings['company_name_en'] ?? ''),
+            'englishName' => trim($organizationSettings['company_name_en'] ?? ''),
+            'logo' => (string)($organizationSettings['company_logo'] ?? ''),
+            'phone' => (string)($organizationSettings['company_phone_call'] ?? ''),
+            'whatsapp' => (string)($organizationSettings['company_phone_whatsapp'] ?? ''),
+            'email' => (string)($organizationSettings['company_email'] ?? ''),
+            'address' => (string)($organizationSettings['company_address'] ?? ''),
+            'city' => (string)($organizationSettings['company_city'] ?? ''),
+            'region' => (string)($organizationSettings['company_region'] ?? ''),
+            'country' => (string)($organizationSettings['company_country'] ?? ''),
+            'postalCode' => (string)($organizationSettings['company_postal_code'] ?? ''),
+            'taxNumber' => (string)($organizationSettings['company_tax_number'] ?? ''),
+        ];
         $payments = [];
         foreach ($records as $record) {
             if (in_array($record['kind'], ['payment', 'receipt'], true)) {
@@ -1600,6 +1675,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         $collected = (float)($ledgerTotals['netCollections'] ?? 0);
         $expenses = (float)($ledgerTotals['expenses'] ?? 0);
         hsJson([
+            'organization' => $organization,
             'summary' => [
                 'customers' => $countKind('customer'), 'containers' => count($assets),
                 'availableContainers' => count(array_filter($assets, static fn(array $r): bool => $r['status'] === 'available')),
@@ -1738,6 +1814,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                     'contract' => hsRecord($existing),
                     'assignment' => ($row = $related('container_assignment')) ? hsRecord($row) : null,
                     'appointment' => ($row = $related('appointment')) ? hsRecord($row) : null,
+                    'workOrder' => ($row = $related('work_order')) ? hsRecord($row) : null,
                     'serviceRequest' => $serviceRequest,
                     'idempotent' => true,
                 ]);
@@ -1767,6 +1844,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                         'contract' => hsRecord($linkedContract),
                         'assignment' => ($row = $related('container_assignment')) ? hsRecord($row) : null,
                         'appointment' => ($row = $related('appointment')) ? hsRecord($row) : null,
+                        'workOrder' => ($row = $related('work_order')) ? hsRecord($row) : null,
                         'serviceRequest' => $serviceStmt->fetch(PDO::FETCH_ASSOC) ?: null,
                         'idempotent' => true,
                     ]);
@@ -1790,6 +1868,11 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         // payload carries the asset's actual availability.
         $assetPayload = hsPayload($asset['payload']);
         hsApplyRequestContainerType($contract, $service, $assetPayload);
+        $assetCategory = hsContractCategory($assetPayload);
+        if ($assetCategory !== '') {
+            $contract['category'] = $assetCategory;
+            $contract['classification'] = $assetCategory;
+        }
         $assetAvailability = hsCanonicalAssetStatus((string)($assetPayload['status'] ?? $asset['status']), (string)$asset['status']);
         if (!in_array($assetAvailability, ['available', 'reserved', 'active'], true)) hsJson(['error' => 'الحاوية ليست متاحة للتخصيص'], 422);
         // The wizard selects the asset by record id. Older bundles sometimes
@@ -1800,6 +1883,29 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         }
         $contract['siteRecordId'] = $siteId;
         $assignment['siteRecordId'] = $siteId;
+        $customerPayloadForContract = hsPayload($customer['payload']);
+        $commercialRegistration = trim((string)($contract['customerCommercialRegistration'] ?? $contract['commercialRegistration'] ?? ''));
+        if ($commercialRegistration === '') {
+            foreach (['commercialRegistration', 'commercialRegistrationNumber', 'crNumber', 'registrationNumber'] as $field) {
+                $commercialRegistration = trim((string)($customerPayloadForContract[$field] ?? ''));
+                if ($commercialRegistration !== '') break;
+            }
+        }
+        $taxNumber = trim((string)($contract['customerTaxNumber'] ?? $contract['taxNumber'] ?? ''));
+        if ($taxNumber === '') {
+            foreach (['taxNumber', 'vatNumber', 'taxId'] as $field) {
+                $taxNumber = trim((string)($customerPayloadForContract[$field] ?? ''));
+                if ($taxNumber !== '') break;
+            }
+        }
+        if ($commercialRegistration !== '') {
+            $contract['customerCommercialRegistration'] = $commercialRegistration;
+            $contract['commercialRegistration'] = $commercialRegistration;
+        }
+        if ($taxNumber !== '') {
+            $contract['customerTaxNumber'] = $taxNumber;
+            $contract['taxNumber'] = $taxNumber;
+        }
         hsValidateRecord($pdo, 'contract', $contract);
         if (hsContractHasOverlappingDates($pdo, $contract)) {
             hsJson(['error' => 'الحاوية مرتبطة بعقد آخر خلال نفس الفترة'], 409);
@@ -1867,30 +1973,80 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             $pdo->prepare("UPDATE container_system_records SET reference = :reference WHERE id = :id")->execute([':reference' => 'ASSIGN-' . $assignmentId, ':id' => $assignmentId]);
             $assetPayload['assignmentRecordId'] = $assignmentId; $assetPayload['assignedContractRecordId'] = $contractId; $assetPayload['assignedSiteRecordId'] = $siteId;
             $pdo->prepare("UPDATE container_system_records SET status = 'reserved', payload = :payload, updated_at = :updated_at WHERE id = :id")->execute([':payload' => json_encode($assetPayload, JSON_UNESCAPED_UNICODE), ':updated_at' => $now, ':id' => $assetId]);
-            $appointment['contractRecordId'] = $contractId; $appointment['contractNumber'] = $contractNumber; $appointment['customerRecordId'] = $customerId; $appointment['containerRecordId'] = $assetId;
-            $insert->execute([':kind' => 'appointment', ':status' => 'scheduled', ':payload' => json_encode($appointment, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':operation_key' => null, ':created_by' => $actorId, ':created_at' => $now, ':updated_at' => $now]);
-            $appointmentId = (int)$pdo->lastInsertId();
-            $pdo->prepare("UPDATE container_system_records SET reference = :reference WHERE id = :id")->execute([':reference' => 'APT-' . $appointmentId, ':id' => $appointmentId]);
             $customerPayload = hsPayload($customer['payload']);
             // Hostinger databases may have service_requests timestamps without
             // a SQLite default. Always provide both values explicitly so the
             // workflow remains valid across old and new schemas.
             if ($existingServiceRequestId > 0) {
-                $existingServiceStmt = $pdo->prepare("SELECT id, contract_record_id FROM service_requests WHERE id = :id LIMIT 1");
+                $existingServiceStmt = $pdo->prepare("SELECT id, status, contract_record_id FROM service_requests WHERE id = :id LIMIT 1");
                 $existingServiceStmt->execute([':id' => $existingServiceRequestId]);
                 $existingService = $existingServiceStmt->fetch(PDO::FETCH_ASSOC);
                 if (!$existingService) throw new RuntimeException('طلب الخدمة المرتبط غير موجود');
                 if (!empty($existingService['contract_record_id']) && (int)$existingService['contract_record_id'] !== $contractId) {
                     throw new RuntimeException('طلب الخدمة مرتبط بعقد آخر بالفعل');
                 }
-                $pdo->prepare("UPDATE service_requests SET customer_record_id = :customer_record_id, container_record_id = :container_record_id, contract_record_id = :contract_record_id, updated_at = :updated_at WHERE id = :id")
-                    ->execute([':customer_record_id' => $customerId, ':container_record_id' => $assetId, ':contract_record_id' => $contractId, ':updated_at' => $now, ':id' => $existingServiceRequestId]);
+                $serviceStatus = (string)($existingService['status'] ?? 'pending');
+                if ($serviceStatus === 'pending') $serviceStatus = 'in_progress';
+                $pdo->prepare("UPDATE service_requests SET status = :status, customer_record_id = :customer_record_id, container_record_id = :container_record_id, contract_record_id = :contract_record_id, updated_at = :updated_at WHERE id = :id")
+                    ->execute([':status' => $serviceStatus, ':customer_record_id' => $customerId, ':container_record_id' => $assetId, ':contract_record_id' => $contractId, ':updated_at' => $now, ':id' => $existingServiceRequestId]);
                 $serviceId = $existingServiceRequestId;
             } else {
-                $serviceStmt = $pdo->prepare("INSERT INTO service_requests (client_name, phone, email, service_type, container_size, property_type, area_size, location, duration, notes, appointment_type, scheduled_at, customer_record_id, container_record_id, contract_record_id, created_at, updated_at) VALUES (:client_name, :phone, :email, :service_type, :container_size, :property_type, :area_size, :location, :duration, :notes, :appointment_type, :scheduled_at, :customer_record_id, :container_record_id, :contract_record_id, :created_at, :updated_at)");
-                $serviceStmt->execute([':client_name' => (string)($service['clientName'] ?? $customerPayload['name'] ?? ''), ':phone' => (string)($service['phone'] ?? $customerPayload['phone'] ?? ''), ':email' => (string)($service['email'] ?? $customerPayload['email'] ?? ''), ':service_type' => (string)($service['serviceType'] ?? 'تسليم حاوية'), ':container_size' => (string)($service['containerSize'] ?? $contract['containerCode'] ?? ''), ':property_type' => (string)($service['propertyType'] ?? ''), ':area_size' => (string)($service['areaSize'] ?? ''), ':location' => (string)($service['location'] ?? $contract['location'] ?? 'يحدد لاحقًا'), ':duration' => (string)($service['duration'] ?? $contract['duration'] ?? ''), ':notes' => (string)($service['notes'] ?? $contract['notes'] ?? ''), ':appointment_type' => 'scheduled', ':scheduled_at' => (string)($service['scheduledAt'] ?? $appointment['scheduledAt'] ?? ''), ':customer_record_id' => $customerId, ':container_record_id' => $assetId, ':contract_record_id' => $contractId, ':created_at' => $now, ':updated_at' => $now]);
-                $serviceId = (int)$pdo->lastInsertId();
+                $serviceId = null;
             }
+            $appointmentType = strtolower(trim((string)($appointment['appointmentType'] ?? 'delivery')));
+            $operationType = in_array($appointmentType, ['pickup', 'return', 'استرجاع', 'استلام'], true)
+                ? 'PICKUP_CONTAINER'
+                : 'DELIVER_CONTAINER';
+            $workOrderOperationKey = $operationKey !== ''
+                ? $operationKey . ':work-order'
+                : 'contract-' . $contractId . '-delivery';
+            $scheduledAt = trim((string)($service['scheduledAt'] ?? $appointment['scheduledAt'] ?? ''));
+            if ($scheduledAt === '' && !empty($appointment['appointmentDate'])) {
+                $scheduledAt = (string)$appointment['appointmentDate'] . 'T' . (string)($appointment['appointmentTime'] ?? '00:00') . ':00';
+            }
+            $workOrderPayload = [
+                'operationKey' => $workOrderOperationKey,
+                'workOrderNumber' => 'WO-' . str_pad((string)$contractId, 6, '0', STR_PAD_LEFT),
+                'contractNumber' => $contractNumber,
+                'customerRecordId' => $customerId,
+                'contractRecordId' => $contractId,
+                'contractRecordIds' => [$contractId],
+                'containerRecordId' => $assetId,
+                'containerRecordIds' => [$assetId],
+                'containerCodes' => [(string)($contract['containerCode'] ?? hsAssetCode($assetPayload))],
+                'siteRecordId' => $siteId,
+                'customerName' => (string)($service['clientName'] ?? $customerPayload['name'] ?? $customerPayload['customerName'] ?? ''),
+                'phone' => (string)($service['phone'] ?? $customerPayload['phone'] ?? ''),
+                'email' => (string)($service['email'] ?? $customerPayload['email'] ?? ''),
+                'operationType' => $operationType,
+                'legacyRequestId' => $existingServiceRequestId > 0 ? $existingServiceRequestId : null,
+                'serviceType' => (string)($service['serviceType'] ?? ($operationType === 'PICKUP_CONTAINER' ? 'استرجاع حاوية' : 'تسليم حاوية')),
+                'containerCode' => (string)($contract['containerCode'] ?? hsAssetCode($assetPayload)),
+                'location' => (string)($service['location'] ?? $contract['location'] ?? 'يحدد لاحقًا'),
+                'notes' => (string)($service['notes'] ?? $contract['notes'] ?? ''),
+                'appointmentRecordId' => null,
+                'appointmentType' => (string)($appointment['appointmentType'] ?? 'scheduled'),
+                'appointmentDate' => (string)($appointment['appointmentDate'] ?? ''),
+                'appointmentTime' => (string)($appointment['appointmentTime'] ?? ''),
+                'scheduledAt' => $scheduledAt,
+                'assignedDriverId' => null,
+                'assignedVehicleId' => null,
+                'driverStatus' => 'unassigned',
+                'status' => 'new',
+                'source' => 'contract_workflow',
+            ];
+            $insert->execute([
+                ':kind' => 'work_order',
+                ':status' => 'new',
+                ':payload' => json_encode($workOrderPayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
+                ':operation_key' => $workOrderOperationKey,
+                ':created_by' => $actorId,
+                ':created_at' => $now,
+                ':updated_at' => $now,
+            ]);
+            $workOrderId = (int)$pdo->lastInsertId();
+            $pdo->prepare("UPDATE container_system_records SET reference = :reference WHERE id = :id")
+                ->execute([':reference' => $workOrderPayload['workOrderNumber'], ':id' => $workOrderId]);
             $invoiceRow = null;
             $billingEnabled = !in_array(strtolower(trim((string)($contract['billingEnabled'] ?? 'true'))), ['false', '0', 'no'], true);
             if ($billingEnabled) {
@@ -1941,8 +2097,18 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                 }
             }
             $pdo->commit();
-            $contractRow = $find($pdo, $contractId); $assignmentRow = $find($pdo, $assignmentId); $appointmentRow = $find($pdo, $appointmentId);
-            hsJson(['contract' => hsRecord($contractRow), 'assignment' => hsRecord($assignmentRow), 'appointment' => hsRecord($appointmentRow), 'serviceRequest' => ['id' => $serviceId], 'invoice' => $invoiceRow ? hsRecord($invoiceRow) : null, 'idempotent' => false], 201);
+            $contractRow = $find($pdo, $contractId);
+            $assignmentRow = $find($pdo, $assignmentId);
+            $workOrderRow = $find($pdo, $workOrderId);
+            hsJson([
+                'contract' => hsRecord($contractRow),
+                'assignment' => hsRecord($assignmentRow),
+                'appointment' => null,
+                'workOrder' => hsRecord($workOrderRow),
+                'serviceRequest' => $serviceId ? ['id' => $serviceId] : null,
+                'invoice' => $invoiceRow ? hsRecord($invoiceRow) : null,
+                'idempotent' => false,
+            ], 201);
         } catch (Throwable $error) {
             if ($pdo->inTransaction()) $pdo->rollBack();
             error_log('[container-system] contract workflow failed: ' . $error->getMessage());

@@ -124,7 +124,7 @@ const initialForm: FormState = {
   classification: "",
   trips: "",
   unitPrice: "",
-  pricingMode: "dynamic",
+  pricingMode: "manual",
   newClause: "",
   clauses: DEFAULT_CLAUSES,
 }
@@ -331,14 +331,12 @@ export function ContractWizard({ open, records, initialCustomerId = null, initia
   const [step, setStep] = useState(0)
   const [form, setForm] = useState<FormState>(initialForm)
   const [error, setError] = useState("")
-  const [priceConfirmed, setPriceConfirmed] = useState(false)
   const [mapOpen, setMapOpen] = useState(false)
 
   useEffect(() => {
     if (!open) return
     setStep(0)
     setError("")
-    setPriceConfirmed(false)
     setMapOpen(false)
     const requestCustomer = initialRequest
       ? records.find(record => {
@@ -479,10 +477,13 @@ export function ContractWizard({ open, records, initialCustomerId = null, initia
   const selectedContainerType = containerTypes.find(item => String(item.id) === form.containerTypeId)
   const selectedRentalLine = rentalLines.find(record => String(record.id) === form.rentalLineId)
   const isAssetlessContract = selectedContainerType?.category === "contract"
-  const showBusinessIdentifiers = Boolean(form.customerRecordId)
+  const showBusinessIdentifiers = Boolean(form.customerRecordId) && selectedContainerType?.category === "waste"
   const containerSize = String(containerPayload?.size ?? containerPayload?.containerSize ?? containerPayload?.capacity ?? containerPayload?.typeName ?? "")
   const categoryOptions = selectedContainerType ? [selectedContainerType.category] : []
-  const amount = Number(form.amount || 0)
+  const calculatedAmount = form.pricingMode === "dynamic"
+    ? Math.round(Number(form.trips || 0) * Number(form.unitPrice || 0) * 100) / 100
+    : Number(form.amount || 0)
+  const amount = Number.isFinite(calculatedAmount) ? calculatedAmount : 0
   const taxRate = Number(form.taxRate || 0)
   const taxInclusive = form.taxInclusive === "true"
   const total = taxInclusive ? amount : amount + Math.round(amount * taxRate) / 100
@@ -493,7 +494,6 @@ export function ContractWizard({ open, records, initialCustomerId = null, initia
 
   const update = (key: keyof FormState, value: string) => {
     setError("")
-    if (key === "unitPrice" || key === "trips" || key === "amount" || key === "pricingMode") setPriceConfirmed(false)
     setForm(current => {
       const next = { ...current, [key]: value }
       if (key === "customerRecordId") {
@@ -614,39 +614,23 @@ export function ContractWizard({ open, records, initialCustomerId = null, initia
 
   if (!open) return null
 
-  const calculatePricing = () => {
-    if (form.pricingMode === "manual") {
-      if (!form.amount || amount < 0) {
-        setError("أدخل قيمة العقد يدويًا قبل الاعتماد.")
-        return
-      }
-      setPriceConfirmed(true)
-      setError("")
-      return
-    }
-    const trips = Number(form.trips || 0)
-    const unitPrice = Number(form.unitPrice || 0)
-    if (!form.unitPrice || unitPrice < 0 || trips <= 0) {
-      setError("أدخل عدد الرحلات وسعر الرحلة أولاً لاحتساب قيمة التعاقد.")
-      return
-    }
-    setForm(current => ({ ...current, amount: String(Math.round(trips * unitPrice * 100) / 100) }))
-    setPriceConfirmed(true)
-    setError("")
-  }
-
   const validateStep = (targetStep = step) => {
     if (targetStep === 0 && !customer) return "اختر عميلاً مسجلاً قبل المتابعة"
     if (targetStep === 1 && !form.location.trim()) return "اختر موقع العميل المسجل أو أدخل الموقع يدويًا عند عدم توفر موقع مسجل"
     if (targetStep === 1 && !form.containerTypeId) return "اختر نوع الحاوية المركزي قبل المتابعة"
     if (targetStep === 1 && !isAssetlessContract && !container) return "اختر أصلاً متاحاً من النوع المحدد قبل المتابعة"
-    if (targetStep === 1 && !form.customerCommercialRegistration.trim()) return "السجل التجاري للعميل مطلوب عند إنشاء العقد"
-    if (targetStep === 1 && !form.customerTaxNumber.trim()) return "الرقم الضريبي للعميل مطلوب عند إنشاء العقد"
+    if (targetStep === 1 && selectedContainerType?.category === "waste" && !form.customerCommercialRegistration.trim()) return "السجل التجاري للعميل مطلوب لعقود النفايات"
+    if (targetStep === 1 && selectedContainerType?.category === "waste" && !form.customerTaxNumber.trim()) return "الرقم الضريبي للعميل مطلوب لعقود النفايات"
     if (targetStep === 1 && !form.startDate) return "تاريخ بداية العقد مطلوب"
     if (targetStep === 1 && !form.endDate) return "تاريخ نهاية العقد مطلوب"
     if (targetStep === 1 && form.endDate < form.startDate) return "نهاية العقد يجب أن تكون بعد بدايته"
-    if (targetStep === 2 && form.pricingMode === "dynamic" && (!form.unitPrice || Number(form.trips) <= 0 || !priceConfirmed)) return "أدخل عدد الرحلات وسعر الوحدة ثم اعتمد التسعير الديناميكي"
-    if (targetStep === 2 && form.pricingMode === "manual" && (!form.amount || amount < 0 || !priceConfirmed)) return "أدخل قيمة العقد يدويًا ثم اعتمد السعر"
+    if (targetStep === 2 && form.pricingMode === "dynamic" && (
+      !form.trips.trim() || !Number.isFinite(Number(form.trips)) || Number(form.trips) <= 0 ||
+      !form.unitPrice.trim() || !Number.isFinite(Number(form.unitPrice)) || Number(form.unitPrice) < 0
+    )) return "أدخل عدد رحلات صحيحًا وسعرًا صالحًا لحساب قيمة العقد تلقائيًا"
+    if (targetStep === 2 && form.pricingMode === "manual" && (
+      !form.amount.trim() || !Number.isFinite(Number(form.amount)) || amount < 0
+    )) return "أدخل قيمة العقد يدويًا"
     if (targetStep === 3 && !form.appointmentDate) return "حدد موعد العملية الأولى قبل المتابعة"
     return ""
   }
@@ -691,6 +675,7 @@ export function ContractWizard({ open, records, initialCustomerId = null, initia
       startDate: form.startDate,
       endDate: form.endDate,
       amount: netAmount,
+      pricingMode: form.pricingMode,
       taxRate,
       taxAmount,
       total,
@@ -770,12 +755,12 @@ export function ContractWizard({ open, records, initialCustomerId = null, initia
 
             {step === 2 && <section className="space-y-4">
               <div><h3 className="font-black text-slate-900">التسعير والضريبة</h3><p className="mt-1 text-sm text-slate-500">أدخل القيمة الأساسية، وسيحسب النظام الضريبة والإجمالي تلقائيًا.</p></div>
-                <div className="grid gap-4 sm:grid-cols-2"><div><Label htmlFor="contract-pricing-mode">طريقة التسعير</Label><select id="contract-pricing-mode" value={form.pricingMode} onChange={event => update("pricingMode", event.target.value)} className="mt-2 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="dynamic">ديناميكي حسب عدد الرحلات</option><option value="manual">إدخال يدوي لقيمة العقد</option></select></div><div><Label htmlFor="contract-tax">نسبة الضريبة %</Label><Input id="contract-tax" type="number" min="0" value={form.taxRate} onChange={event => update("taxRate", event.target.value)} className="mt-2" dir="ltr" /></div></div>
+                <div className="grid gap-4 sm:grid-cols-2"><div><Label htmlFor="contract-pricing-mode">طريقة التسعير</Label><select id="contract-pricing-mode" value={form.pricingMode} onChange={event => update("pricingMode", event.target.value)} className="mt-2 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="manual">إدخال يدوي لقيمة العقد</option><option value="dynamic">تسعير استثنائي حسب عدد الرحلات</option></select></div><div><Label htmlFor="contract-tax">نسبة الضريبة %</Label><Input id="contract-tax" type="number" min="0" value={form.taxRate} onChange={event => update("taxRate", event.target.value)} className="mt-2" dir="ltr" /></div></div>
                 {form.pricingMode === "dynamic" ? <div className="grid gap-4 sm:grid-cols-2"><div><Label htmlFor="contract-trips-pricing">عدد الرحلات</Label><Input id="contract-trips-pricing" type="number" min="1" value={form.trips} onChange={event => update("trips", event.target.value)} className="mt-2" dir="ltr" placeholder="0" /></div><div><Label htmlFor="contract-unit-price">سعر الوحدة / الرحلة</Label><Input id="contract-unit-price" type="number" min="0" value={form.unitPrice} onChange={event => update("unitPrice", event.target.value)} className="mt-2" dir="ltr" placeholder="0" /></div></div> : <div><Label htmlFor="contract-amount">قيمة العقد قبل الضريبة</Label><Input id="contract-amount" type="number" min="0" value={form.amount} onChange={event => update("amount", event.target.value)} className="mt-2" dir="ltr" placeholder="أدخل القيمة" /><p className="mt-1 text-[11px] text-slate-500">لن يتم احتسابها من عدد الرحلات.</p></div>}
                <div className="grid grid-cols-3 gap-3 rounded-2xl bg-slate-50 p-4 text-center"><div><p className="text-xs text-slate-500">قبل الضريبة</p><b className="mt-1 block text-lg text-slate-900">{netAmount.toLocaleString("ar-SA")} ر.س</b></div><div><p className="text-xs text-slate-500">الضريبة</p><b className="mt-1 block text-lg text-amber-700">{taxAmount.toLocaleString("ar-SA")} ر.س</b></div><div><p className="text-xs text-slate-500">الإجمالي</p><b className="mt-1 block text-lg text-emerald-700">{total.toLocaleString("ar-SA")} ر.س</b></div></div>
                <div><Label htmlFor="contract-notes">ملاحظات</Label><textarea id="contract-notes" value={form.notes} onChange={event => update("notes", event.target.value)} rows={3} className="mt-2 w-full rounded-lg border border-slate-200 p-3 text-sm outline-none focus:border-cyan-600" placeholder="شروط التسليم أو الاستثناءات..." /></div>
                <div className="rounded-2xl border border-amber-100 bg-amber-50/60 p-4"><div><h4 className="font-black text-slate-900">بنود العقد</h4><p className="mt-1 text-xs text-slate-600">البنود الموجودة محفوظة تلقائياً، ويمكنك إضافة أي بند خاص بالعقد.</p></div><ol className="mt-3 space-y-2 pr-5 text-sm leading-6">{form.clauses.map((clause, index) => <li key={`${clause}-${index}`} className="flex items-start gap-2"><span className="flex-1">{clause}</span><button type="button" onClick={() => setForm(current => ({ ...current, clauses: current.clauses.filter((_, clauseIndex) => clauseIndex !== index) }))} className="mt-1 text-rose-600 hover:text-rose-800" aria-label="حذف البند"><Trash2 size={15} /></button></li>)}</ol><div className="mt-4 flex flex-col gap-2 sm:flex-row"><Input value={form.newClause} onChange={event => update("newClause", event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); addClause() } }} placeholder="اكتب بنداً جديداً" /><Button type="button" variant="outline" onClick={addClause} className="gap-2 border-amber-300 text-amber-900 hover:bg-amber-100"><Plus size={16} /> إضافة البند</Button></div></div>
-                <div className="rounded-2xl border border-emerald-200 bg-emerald-50/70 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-black text-emerald-950">تأكيد التسعير</p><p className="mt-1 text-xs text-emerald-800">{form.pricingMode === "dynamic" ? "سيحسب النظام قيمة العقد من عدد الرحلات × سعر الوحدة." : "سيستخدم النظام القيمة التي أدخلتها مباشرة."}</p></div><Button type="button" onClick={calculatePricing} className="gap-2 bg-emerald-700 hover:bg-emerald-800"><CheckCircle2 size={16} /> اعتماد السعر</Button></div>{priceConfirmed && <p className="mt-3 text-xs font-bold text-emerald-700">تم اعتماد السعر: {amount.toLocaleString("ar-SA")} ر.س قبل الضريبة</p>}</div></section>}
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50/70 p-4 text-sm text-emerald-950"><p className="font-black">السعر يعتمد تلقائيًا</p><p className="mt-1 text-xs text-emerald-800">{form.pricingMode === "dynamic" ? "تتحدث قيمة العقد مباشرة عند تعديل عدد الرحلات أو سعر الوحدة." : "قيمة العقد هي المبلغ الذي أدخلته، وتُحدّث الضريبة والإجمالي تلقائيًا."}</p><p className="mt-2 text-xs font-bold">قيمة العقد الحالية قبل الضريبة: {amount.toLocaleString("ar-SA")} ر.س</p></div></section>}
 
             {step === 3 && <section className="space-y-4">
               <div><h3 className="font-black text-slate-900">العملية الأولى والموعد</h3><p className="mt-1 text-sm text-slate-500">اربط العقد بموعد حقيقي حتى يظهر مباشرة في مركز التشغيل.</p></div>
