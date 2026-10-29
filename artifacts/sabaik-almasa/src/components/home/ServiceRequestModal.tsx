@@ -12,6 +12,7 @@ import { DraggableMapPicker } from "@/components/ui/DraggableMapPicker"
 import { useGetContainers } from "@workspace/api-client-react"
 import { getVisitorTracking, sendVisitorHeartbeat } from "@/lib/visitorAttribution"
 import { getHighAccuracyPosition } from "@/lib/reverseGeocode"
+import { locationTextWithCoordinates } from "@/lib/location"
 import { getContainersForCategory, getContainerValue } from "@/lib/packageOptions"
 import {
   DEBRIS_RENTAL_DURATION,
@@ -37,7 +38,7 @@ function isValidSaudiPhone(value: string) {
   return /^05\d{8}$/.test(digits) || /^5\d{8}$/.test(digits)
 }
 
-function LocationPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function LocationPicker({ value, onChange, onCoordinates }: { value: string; onChange: (v: string) => void; onCoordinates: (v: string) => void }) {
   const [gpsState, setGpsState] = useState<"idle" | "loading" | "map" | "error">("idle")
   const [initCoords, setInitCoords] = useState<{ lat: number; lng: number } | null>(null)
 
@@ -62,7 +63,10 @@ function LocationPicker({ value, onChange }: { value: string; onChange: (v: stri
           <MapPin size={16} className="absolute right-3 top-3.5 text-gray-400" />
           <Input
             value={value}
-            onChange={e => onChange(e.target.value)}
+            onChange={e => {
+              onChange(e.target.value)
+              onCoordinates("")
+            }}
             placeholder="مثال: الرياض - حي الملقا - شارع أنس بن مالك"
             className="pr-9 rounded-xl h-11 text-sm border-gray-200"
           />
@@ -85,11 +89,13 @@ function LocationPicker({ value, onChange }: { value: string; onChange: (v: stri
             initialLat={initCoords.lat}
             initialLng={initCoords.lng}
             onConfirm={(addr, lat, lng) => {
-              if (addr) onChange(`${addr} (إحداثيات GPS: ${lat.toFixed(6)}, ${lng.toFixed(6)})`)
+              onChange(addr || "الموقع المحدد")
+              onCoordinates(`${lat},${lng}`)
               setGpsState("idle")
             }}
             onSelectLocation={(lat, lng, address) => {
-              if (address) onChange(`${address} (إحداثيات GPS: ${lat.toFixed(6)}, ${lng.toFixed(6)})`)
+              onChange(address || "الموقع المحدد")
+              onCoordinates(`${lat},${lng}`)
               setGpsState("idle")
             }}
           />
@@ -111,6 +117,7 @@ export function ServiceRequestModal() {
   const [duration, setDuration] = useState(DEBRIS_RENTAL_DURATION)
   const [containerCount, setContainerCount] = useState(1)
   const [location, setLocation] = useState("")
+  const [locationCoordinates, setLocationCoordinates] = useState("")
   const [clientName, setClientName] = useState("")
   const [phone, setPhone] = useState("")
   const [email, setEmail] = useState("")
@@ -131,6 +138,7 @@ export function ServiceRequestModal() {
       setDuration(getDefaultRequestDuration(initialCategory))
       setContainerCount(1)
       setLocation("")
+      setLocationCoordinates("")
       setClientName(preselect?.clientName || "")
       setPhone(preselect?.phone || "")
       setEmail("")
@@ -199,7 +207,7 @@ export function ServiceRequestModal() {
         email: email.trim() || undefined,
         serviceType: serviceType || "حاويات الأنقاض",
         containerSize: containerSize || undefined,
-        location: location.trim(),
+        location: locationTextWithCoordinates(location.trim(), locationCoordinates),
         duration,
         notes: `عدد الوحدات المطلوبة: ${containerCount}`,
         appointmentType: "immediate",
@@ -427,7 +435,11 @@ export function ServiceRequestModal() {
                 {/* Location Picker */}
                 <div>
                   <label className="text-xs font-bold text-gray-700 block mb-1">موقع المشروع / الحي بالرياض *</label>
-                  <LocationPicker value={location} onChange={setLocation} />
+                <LocationPicker
+                  value={location}
+                  onChange={setLocation}
+                  onCoordinates={setLocationCoordinates}
+                />
                   {errors.location && <p className="text-red-500 text-[11px] mt-1">{errors.location}</p>}
                 </div>
 

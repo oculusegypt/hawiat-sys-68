@@ -58,7 +58,7 @@ type FormState = {
   location: string
   locationCoordinates: string
   locationMode: "registered" | "manual" | "map"
-  billingFrequency: "daily" | "weekly" | "monthly" | "yearly"
+  billingFrequency: "ten_days" | "twenty_days" | "thirty_days" | "monthly" | "yearly"
   contractType: string
   propertyNumber: string
   planNumber: string
@@ -140,8 +140,9 @@ function labelOf(record: ContainerSystemRecord) {
 
 function billingFrequencyFromValue(value?: string | null): FormState["billingFrequency"] {
   const normalized = String(value ?? "").trim().toLowerCase()
-  if (/يوم|daily|day/.test(normalized)) return "daily"
-  if (/أسبوع|اسبوع|weekly|week/.test(normalized)) return "weekly"
+  if (/10\s*أيام|10\s*يوم|ten[_ -]?days/.test(normalized)) return "ten_days"
+  if (/20\s*أيام|20\s*يوم|twenty[_ -]?days/.test(normalized)) return "twenty_days"
+  if (/30\s*أيام|30\s*يوم|thirty[_ -]?days/.test(normalized)) return "thirty_days"
   if (/سنة|سنوي|yearly|annual|year/.test(normalized)) return "yearly"
   return "monthly"
 }
@@ -151,8 +152,9 @@ function endDateFromBillingFrequency(startDate: string, frequency: FormState["bi
   if (Number.isNaN(result.getTime())) return ""
   if (frequency === "yearly") result.setFullYear(result.getFullYear() + 1)
   else if (frequency === "monthly") result.setMonth(result.getMonth() + 1)
-  else if (frequency === "weekly") result.setDate(result.getDate() + 7)
-  else result.setDate(result.getDate() + 1)
+  else if (frequency === "ten_days") result.setDate(result.getDate() + 10)
+  else if (frequency === "twenty_days") result.setDate(result.getDate() + 20)
+  else if (frequency === "thirty_days") result.setDate(result.getDate() + 30)
   return result.toISOString().slice(0, 10)
 }
 
@@ -417,7 +419,9 @@ export function ContractWizard({ open, records, initialCustomerId = null, initia
       serviceType: String(initialLinePayload.serviceType ?? initialRequest?.serviceType ?? ""),
       containerSize: initialRequest?.containerSize ?? "",
       location: selectedLocation.address || (initialRequest?.location ?? ""),
-      locationCoordinates: selectedLocation.coordinates || coordinatesFromText(initialRequest?.location),
+      locationCoordinates: selectedLocation.coordinates ||
+        String((initialRequest as typeof initialRequest & { locationCoordinates?: string | null })?.locationCoordinates ?? "") ||
+        coordinatesFromText(initialRequest?.location),
       locationMode: selectedSite ? "registered" : "manual",
       billingFrequency,
       contractType: requestType ? contractCategoryLabel(requestType.category) : initialForm.contractType,
@@ -529,6 +533,15 @@ export function ContractWizard({ open, records, initialCustomerId = null, initia
           key === "startDate" ? value : next.startDate,
           key === "billingFrequency" ? value as FormState["billingFrequency"] : next.billingFrequency,
         )
+      }
+      if (key === "billingFrequency") {
+        const frequencyTrips: Partial<Record<FormState["billingFrequency"], string>> = {
+          ten_days: "1",
+          twenty_days: "2",
+          thirty_days: "3",
+        }
+        const tripCount = frequencyTrips[value as FormState["billingFrequency"]]
+        if (tripCount) next.trips = tripCount
       }
       return next
     })
@@ -696,7 +709,10 @@ export function ContractWizard({ open, records, initialCustomerId = null, initia
       locationMode: form.locationMode,
       serviceType: form.serviceType,
       containerSize: form.containerSize,
-      duration: form.billingFrequency === "daily" ? "يومي" : form.billingFrequency === "weekly" ? "أسبوعي" : form.billingFrequency === "yearly" ? "سنوي" : "شهري",
+      duration: form.billingFrequency === "ten_days" ? "10 أيام - 1 رد"
+        : form.billingFrequency === "twenty_days" ? "20 يوم - 2 رد"
+          : form.billingFrequency === "thirty_days" ? "30 يوم - 3 رد"
+            : form.billingFrequency === "yearly" ? "سنوي" : "شهري",
       billingFrequency: form.billingFrequency,
       createdFrom: "contract_workflow",
       appointmentDate: form.appointmentDate,
@@ -746,7 +762,7 @@ export function ContractWizard({ open, records, initialCustomerId = null, initia
                    <div><Label htmlFor="contract-classification">التصنيف التابع لنوع العقد</Label><select id="contract-classification" value={form.classification || ""} onChange={event => update("classification", event.target.value)} disabled={!form.containerTypeId} className="mt-2 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="">اختر نوع الحاوية أولاً</option>{categoryOptions.map(option => <option key={option} value={option}>{contractCategoryLabel(option)}</option>)}</select><p className="mt-1 text-[11px] text-slate-500">يتحدد من فئة نوع الحاوية ولا يعرض تصنيفات عامة.</p></div>
                   <div><Label htmlFor="contract-size">حجم الحاوية</Label><Input id="contract-size" value={form.containerSize || containerSize} readOnly placeholder="يُحدد تلقائيًا من الأصل" className="mt-2 bg-slate-50" /></div>
                  <div><Label htmlFor="contract-trips">عدد الرحلات</Label><Input id="contract-trips" type="number" min="0" value={form.trips} onChange={event => update("trips", event.target.value)} placeholder="عدد الرحلات" className="mt-2" dir="ltr" /></div>
-                  <div><Label htmlFor="contract-billing-frequency">دورية التعاقد</Label><select id="contract-billing-frequency" value={form.billingFrequency} onChange={event => update("billingFrequency", event.target.value)} className="mt-2 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="daily">يومي</option><option value="weekly">أسبوعي</option><option value="monthly">شهري</option><option value="yearly">سنوي</option></select><p className="mt-1 text-[11px] text-slate-500">يُحتسب تاريخ النهاية تلقائيًا من تاريخ البداية.</p></div>
+                  <div><Label htmlFor="contract-billing-frequency">دورية التعاقد</Label><select id="contract-billing-frequency" value={form.billingFrequency} onChange={event => update("billingFrequency", event.target.value)} className="mt-2 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="ten_days">10 أيام · 1 رد</option><option value="twenty_days">20 يومًا · 2 رد</option><option value="thirty_days">30 يومًا · 3 رد</option><option value="monthly">شهري</option><option value="yearly">سنوي</option></select><p className="mt-1 text-[11px] text-slate-500">يتحدد تاريخ النهاية وعدد الردود تلقائيًا لفترات 10 و20 و30 يومًا.</p></div>
                 <div><Label htmlFor="contract-start">بداية العقد</Label><Input id="contract-start" type="date" value={form.startDate} onChange={event => update("startDate", event.target.value)} className="mt-2" dir="ltr" /></div>
                 <div><Label htmlFor="contract-end">نهاية العقد</Label><Input id="contract-end" type="date" value={form.endDate} onChange={event => update("endDate", event.target.value)} className="mt-2" dir="ltr" /></div>
               </div>

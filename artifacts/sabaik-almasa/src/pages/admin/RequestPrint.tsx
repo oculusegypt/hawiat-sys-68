@@ -4,6 +4,7 @@ import { useGetServiceRequest } from "@workspace/api-client-react"
 import { format } from "date-fns"
 import { arSA } from "date-fns/locale"
 import { useSiteSettings } from "@/context/SiteSettingsContext"
+import { cleanLocationText, parseLocationCoordinates } from "@/lib/location"
 
 const statusMap: Record<string, string> = {
   pending:     "جديد",
@@ -15,12 +16,6 @@ const statusMap: Record<string, string> = {
 const appointmentMap: Record<string, string> = {
   immediate: "فوري",
   scheduled: "موعد محدد",
-}
-
-function parseGPS(location: string): { lat: number; lng: number } | null {
-  const m = location.match(/إحداثيات GPS:\s*([-\d.]+),\s*([-\d.]+)/)
-  if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) }
-  return null
 }
 
 export default function RequestPrint() {
@@ -47,13 +42,15 @@ export default function RequestPrint() {
     )
   }
 
-  const gps = parseGPS(req.location)
+  const coordinates = (req as typeof req & { locationCoordinates?: string | null })?.locationCoordinates
+  const gps = parseLocationCoordinates(coordinates) ?? parseLocationCoordinates(req.location)
+  const displayLocation = cleanLocationText(req.location, "الموقع المحدد")
   const mapSrc = gps
     ? `https://maps.google.com/maps?q=${gps.lat},${gps.lng}&hl=ar&z=16&output=embed`
-    : `https://maps.google.com/maps?q=${encodeURIComponent(req.location + "، الرياض")}&hl=ar&z=14&output=embed`
+    : `https://maps.google.com/maps?q=${encodeURIComponent(displayLocation + "، الرياض")}&hl=ar&z=14&output=embed`
   const directionsUrl = gps
     ? `https://www.google.com/maps/dir/?api=1&destination=${gps.lat},${gps.lng}`
-    : `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(req.location + "، الرياض")}`
+    : `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(displayLocation + "، الرياض")}`
 
   const createdDate = format(new Date(req.createdAt), "dd MMMM yyyy – HH:mm", { locale: arSA })
 

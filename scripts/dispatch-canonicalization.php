@@ -102,6 +102,9 @@ function hsEnsureCanonicalDispatchTasks(PDO $pdo): void {
         $requestRows = $pdo->query("SELECT * FROM service_requests ORDER BY id ASC")->fetchAll(PDO::FETCH_ASSOC);
         foreach ($requestRows as $request) {
             $serviceType = trim((string)($request['service_type'] ?? ''));
+            // Intake requests are not dispatch tasks until a contract and
+            // container have both been linked by the contract workflow.
+            if ((int)($request['contract_record_id'] ?? 0) <= 0 || (int)($request['container_record_id'] ?? 0) <= 0) continue;
             if (preg_match('/(?:عقد|عقود)\s*(?:ال)?(?:نظافة|تنظيف)/u', $serviceType)) continue;
             $requestId = (int)$request['id'];
             $linkedRows = [];
@@ -216,8 +219,9 @@ function hsEnsureCanonicalDispatchTasks(PDO $pdo): void {
         }
 
         foreach ($appointments as $appointment) {
-            $appointmentId = (int)$appointment['id'];
             $source = $parse($appointment);
+            if ((int)($source['contractRecordId'] ?? 0) <= 0 || (int)($source['containerRecordId'] ?? 0) <= 0) continue;
+            $appointmentId = (int)$appointment['id'];
             $alreadyLinked = false;
             foreach ($workOrders as $row) {
                 if (($row['status'] ?? '') === 'archived') continue;

@@ -11,6 +11,7 @@ import {
 import { format } from "date-fns"
 import { arSA } from "date-fns/locale"
 import { useSiteSettings } from "@/context/SiteSettingsContext"
+import { cleanLocationText, parseLocationCoordinates } from "@/lib/location"
 
 const API_BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") || ""
 
@@ -23,6 +24,7 @@ interface ServiceRequest {
   serviceType: string
   containerSize: string
   location: string
+  locationCoordinates?: string | null
   duration?: string | null
   notes?: string | null
   appointmentType?: string | null
@@ -77,22 +79,12 @@ function parseWasteFields(notes: string | null | undefined): { activityType: str
   return { activityType, monthlyEvacuations, cleanNotes: remaining.join("\n").trim() }
 }
 
-function parseGPS(location: string): { lat: number; lng: number } | null {
-  const m = location.match(/إحداثيات GPS:\s*([-\d.]+),\s*([-\d.]+)/)
-  if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) }
-  const bare = location.match(/^([-\d.]+),\s*([-\d.]+)$/)
-  if (bare) return { lat: parseFloat(bare[1]), lng: parseFloat(bare[2]) }
-  return null
+function parseGPS(location: string, coordinates?: string | null): { lat: number; lng: number } | null {
+  return parseLocationCoordinates(coordinates) ?? parseLocationCoordinates(location)
 }
 
 function formatLocationText(location: string): string {
-  // أزل سطر الإحداثيات واعرض العنوان النصي فقط
-  const addressPart = location.split(/\nإحداثيات GPS:/)[0].trim()
-  if (addressPart) return addressPart
-  // للتوافق مع الإدخالات القديمة (إحداثيات خام فقط)
-  const gps = parseGPS(location)
-  if (gps) return `موقع GPS: ${gps.lat.toFixed(5)}, ${gps.lng.toFixed(5)}`
-  return location.trim()
+  return cleanLocationText(location, "الموقع المحدد")
 }
 
 function getMapSrc(location: string): string {
@@ -188,8 +180,10 @@ export default function RequestDetailModal({
     label: request.status, bg: "bg-gray-50", text: "text-gray-700",
     border: "border-gray-200", strip: "bg-gray-400", icon: <FileText className="w-4 h-4" />,
   }
-  const mapSrc       = getMapSrc(request.location)
-  const gps          = parseGPS(request.location)
+  const gps          = parseGPS(request.location, request.locationCoordinates)
+  const mapSrc       = gps
+    ? `https://maps.google.com/maps?q=${gps.lat},${gps.lng}&hl=ar&z=16&output=embed`
+    : getMapSrc(request.location)
   const googleMapsUrl = gps
     ? `https://maps.google.com/maps?q=${gps.lat},${gps.lng}`
     : `https://maps.google.com/maps?q=${encodeURIComponent(request.location)}`

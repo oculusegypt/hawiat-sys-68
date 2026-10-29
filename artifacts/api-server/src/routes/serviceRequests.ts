@@ -8,6 +8,7 @@ import { sourceForRow } from "../lib/attribution";
 import { syncCustomerFromRequest } from "../lib/customerSync";
 import { dispatchConflictMessage, findScheduledDispatchConflict, type ScheduledDispatch } from "../lib/containerDispatch";
 import { refreshPrivateUploadUrl } from "../lib/privateUploadUrl";
+import { encodeLocationText, splitLocationText } from "../lib/location";
 import { ensureCanonicalDispatchTasks } from "../lib/dispatchCanonicalization";
 import crypto from "node:crypto";
 
@@ -70,6 +71,7 @@ type OperationalWorkOrder = typeof serviceRequestsTable.$inferSelect & {
   reconciliationReason: string | null;
   legacyRequestId: number | null;
   appointmentRecordId: number | null;
+  locationCoordinates: string | null;
 };
 
 function classifyContainerOperation(value: unknown): ContainerOperationType | null {
@@ -155,6 +157,7 @@ function operationLocationsNearby(
 
 function operationalRecordAsWorkOrder(record: typeof containerSystemRecordsTable.$inferSelect): OperationalWorkOrder {
   const payload = parseContainerPayload(record.payload);
+  const parsedLocation = splitLocationText(payload.location, payload.locationCoordinates);
   const containerRecordIds = Array.isArray(payload.containerRecordIds)
     ? [...new Set(payload.containerRecordIds.map(Number).filter(id => Number.isInteger(id) && id > 0))]
     : [Number(payload.containerRecordId ?? 0)].filter(id => id > 0);
@@ -175,7 +178,8 @@ function operationalRecordAsWorkOrder(record: typeof containerSystemRecordsTable
     containerCount: containerRecordIds.length || Number(payload.containerCount ?? 1) || 1,
     propertyType: null,
     areaSize: null,
-    location: String(payload.location ?? "يحدد لاحقًا"),
+    location: parsedLocation.address || (parsedLocation.coordinates ? "الموقع المحدد" : String(payload.location ?? "يحدد لاحقًا")),
+    locationCoordinates: parsedLocation.coordinates || null,
     duration: payload.duration ? String(payload.duration) : null,
     notes: String(payload.notes ?? ""),
     appointmentType: String(payload.appointmentType ?? "scheduled"),
@@ -560,6 +564,8 @@ async function addPresenceToRequests<T extends typeof serviceRequestsTable.$infe
 
     return {
       ...request,
+      location: splitLocationText(request.location).address || (splitLocationText(request.location).coordinates ? "الموقع المحدد" : ""),
+      locationCoordinates: splitLocationText(request.location).coordinates || null,
       driverProofPhotoUrl: refreshPrivateUploadUrl(request.driverProofPhotoUrl),
       conversationId: visitor?.conversationId ?? null,
       isOnline: Boolean(visitor && isRecent(visitor.lastSeen, ONLINE_WINDOW_MS)),
@@ -593,6 +599,7 @@ router.post("/admin/service-requests/from-contract", requireAdmin, requireAnySec
     containerSize,
     containerCount: rawContainerCount,
     location,
+    locationCoordinates,
     duration,
     notes,
     appointmentType,
@@ -913,7 +920,7 @@ router.post("/service-requests", async (req, res) => {
     // empty-string fallback when the client submits no container size.
     containerSize: containerSize || "",
     containerCount,
-    location: location || "غير محدد",
+    location: encodeLocationText(location || "غير محدد", locationCoordinates),
     duration: normalizedDuration,
     notes: finalNotes,
     appointmentType: isQuoteRequest ? "immediate" : (appointmentType || "immediate"),
@@ -951,7 +958,7 @@ router.post("/service-requests", async (req, res) => {
       `رقم الجوال: ${request.phone}`,
       `الخدمة: ${request.serviceType}`,
       request.containerSize ? `الباقة / المقاس: ${request.containerSize}` : "",
-      `الموقع: ${request.location}`,
+      `الموقع: ${splitLocationText(request.location).address || "الموقع المحدد"}`,
       request.appointmentType === "scheduled" && request.scheduledAt
         ? `الموعد: ${request.scheduledAt}`
         : "الموعد: أقرب وقت ممكن",
@@ -984,7 +991,11 @@ router.post("/service-requests", async (req, res) => {
       .where(eq(conversationsTable.id, conversationId));
   }
 
-  return res.status(201).json({ ...request, trackingToken: createTrackingToken(request.id) });
+  return res.status(201).json({
+    ...request,
+    location: splitLocationText(request.location).address || (splitLocationText(request.location).coordinates ? "الموقع المحدد" : ""),
+    trackingToken: createTrackingToken(request.id),
+  });
 });
 
 // Numeric IDs alone must never disclose customer data. The opaque token is
@@ -1023,7 +1034,7 @@ router.patch("/service-requests/:id", requireAdmin, requireSectionPermission("re
   const id = parseInt(String(req.params.id), 10);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "رقم الطلب غير صحيح" });
   const {
-    clientName, phone, email, serviceType, containerSize, location,
+    clientName, phone, email, serviceType, containerSize, location, locationCoordinates,
     containerCount,
     duration, notes, appointmentType, scheduledAt, status, adminNotes,
     customerRecordId, containerRecordId, contractRecordId,
@@ -1043,7 +1054,7 @@ router.patch("/service-requests/:id", requireAdmin, requireSectionPermission("re
     }
     updateData.containerCount = parsedContainerCount;
   }
-  if (location !== undefined)        updateData.location        = location;
+  if (location !== undefined)        updateData.location        = encodeLocationText(location, locationCoordinates);
   if (duration !== undefined)        updateData.duration        = duration;
   if (notes !== undefined)           updateData.notes           = notes;
   if (appointmentType !== undefined) updateData.appointmentType = appointmentType;
@@ -1220,7 +1231,13 @@ router.patch("/service-requests/:id", requireAdmin, requireSectionPermission("re
   if ("error" in outcome && typeof outcome.error === "string") {
     return res.status(Number(outcome.status ?? 500)).json({ error: outcome.error });
   }
-  return res.json(outcome.request);
+  const updatedRequest = outcome.request;
+  const parsedLocation = splitLocationText(updatedRequest.location);
+  return res.json({
+    ...updatedRequest,
+    location: parsedLocation.address || (parsedLocation.coordinates ? "الموقع المحدد" : ""),
+    locationCoordinates: parsedLocation.coordinates || null,
+  });
 });
 
 router.patch("/service-requests/:id/assignment", requireAdmin, requireSectionPermission("work_orders"), requireRequestAssignment, async (req, res) => {

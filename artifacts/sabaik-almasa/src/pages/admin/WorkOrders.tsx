@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { SignaturePad } from "./ContainerSystemComponents";
+import { cleanLocationText, parseLocationCoordinates } from "@/lib/location";
 import {
   Check,
   CheckCircle2,
@@ -137,13 +138,11 @@ function statusInfo(status?: string) {
   );
 }
 
-function directionsUrl(location: string) {
-  const gps =
-    location.match(/إحداثيات GPS:\s*([-\d.]+),\s*([-\d.]+)/) ??
-    location.match(/^([-\d.]+),\s*([-\d.]+)$/);
+function directionsUrl(location: string, coordinates?: string | null) {
+  const gps = parseLocationCoordinates(coordinates) ?? parseLocationCoordinates(location);
   const destination = gps
-    ? `${gps[1]},${gps[2]}`
-    : `${location}، الرياض، المملكة العربية السعودية`;
+    ? `${gps.lat},${gps.lng}`
+    : `${cleanLocationText(location, "")}، الرياض، المملكة العربية السعودية`;
   return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destination)}`;
 }
 
@@ -294,11 +293,9 @@ function OrderDetailsDialog({
   isDriver: boolean;
 }) {
   if (!order) return null;
-  const cleanLocation = order.location
-    .replace(/\n?إحداثيات GPS:\s*[-\d.]+,\s*[-\d.]+/, "")
-    .trim();
-  const locationLabel = cleanLocation || order.location;
-  const mapUrl = directionsUrl(order.location);
+  const extendedOrder = order as ServiceRequest & { locationCoordinates?: string | null };
+  const locationLabel = cleanLocationText(order.location, "الموقع المحدد");
+  const mapUrl = directionsUrl(order.location, extendedOrder.locationCoordinates);
 
   return (
     <Dialog open={open} onOpenChange={(value) => !value && onClose()}>

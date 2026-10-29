@@ -150,6 +150,9 @@ export function ensureCanonicalDispatchTasks(): void {
     const appointments = allRows.filter((row) => row.kind === "appointment" && row.status !== "archived");
 
     for (const request of requests) {
+      // A service request is intake only. Dispatch work starts after a
+      // contract and a container have both been linked by the contract flow.
+      if (!numericId(request.contractRecordId) || !numericId(request.containerRecordId)) continue;
       if (/(?:عقد|عقود)\s*(?:ال)?(?:نظافة|تنظيف)/u.test(String(request.serviceType ?? "").trim())) continue;
       const existingLinks = workOrders.filter((row) =>
         row.status !== "archived" &&
@@ -284,6 +287,7 @@ export function ensureCanonicalDispatchTasks(): void {
 
     for (const appointment of appointments) {
       const source = parsePayload(appointment.payload);
+      if (!numericId(source.contractRecordId) || !numericId(source.containerRecordId)) continue;
       const appointmentId = appointment.id;
       const alreadyLinked = workOrders.find((row) => {
         const payload = parsePayload(row.payload);

@@ -9,6 +9,7 @@ import {
 import type { AdminRequest } from "../middleware/adminAuth";
 import { getSetting } from "./settings";
 import { refreshPrivateUploadUrl } from "../lib/privateUploadUrl";
+import { cleanLocationPayload, splitLocationText } from "../lib/location";
 
 const router = Router();
 const supportedKinds = [
@@ -409,7 +410,7 @@ async function findByOperationKey(kind: string, operationKey: string) {
 function formatRecord(
   row: Omit<typeof containerSystemRecordsTable.$inferSelect, "payload"> & { payload: unknown },
 ) {
-  const payload = parsePayload(row.payload);
+  const payload = cleanLocationPayload(parsePayload(row.payload));
   if (payload.driverProofPhotoUrl) payload.driverProofPhotoUrl = refreshPrivateUploadUrl(payload.driverProofPhotoUrl);
   if (payload.proofPhotoUrl) payload.proofPhotoUrl = refreshPrivateUploadUrl(payload.proofPhotoUrl);
   return { ...row, payload };
@@ -485,7 +486,7 @@ function generatedDocumentNumber(kind: "contract" | "invoice" | "receipt", id: n
 }
 
 function normalizeContractPayload(payload: Record<string, unknown>) {
-  const next = { ...payload };
+  const next = cleanLocationPayload({ ...payload });
   next.currency = String(next.currency ?? "SAR").toUpperCase();
   const amount = Number(next.amount ?? 0);
   const taxRate = Number(next.taxRate ?? 15);
@@ -504,7 +505,7 @@ function normalizeContractPayload(payload: Record<string, unknown>) {
       next.total = Math.round((amount + Number(next.taxAmount)) * 100) / 100;
     }
   }
-  return next;
+  return cleanLocationPayload(next);
 }
 
 function normalizeInvoicePayload(payload: Record<string, unknown>) {
@@ -1781,6 +1782,7 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
           serviceType: String(servicePayload.serviceType ?? "تسليم حاوية"),
           containerCode: String(contractPayload.containerCode ?? assetPayload.assetCode ?? assetPayload.code ?? asset?.reference ?? ""),
           location: String(servicePayload.location ?? contractPayload.location ?? "يحدد لاحقًا"),
+          locationCoordinates: String(contractPayload.locationCoordinates ?? splitLocationText(contractPayload.location).coordinates ?? ""),
           notes: String(servicePayload.notes ?? contractPayload.notes ?? ""),
           appointmentRecordId: null,
           appointmentType: String(appointmentPayload.appointmentType ?? "scheduled"),
@@ -1857,7 +1859,8 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
       // customer-facing invoice lifecycle as DUE until it is posted.
       const billingEnabled = !["false", "0", "no", "نعم لا"].includes(String(contractPayload.billingEnabled ?? "true").trim().toLowerCase());
       const contractState = String(contract.status).toLowerCase();
-      const billable = billingEnabled && !["draft", "cancelled", "rejected", "free", "non_billable"].includes(contractState) &&
+      const contractValue = Number(contractPayload.total ?? contractPayload.amount ?? 0);
+      const billable = billingEnabled && contractValue > 0 && !["draft", "cancelled", "rejected", "free", "non_billable"].includes(contractState) &&
         !["false", "0", "no", "free", "non_billable"].includes(String(contractPayload.billable ?? "true").trim().toLowerCase());
       let invoice: typeof containerSystemRecordsTable.$inferSelect | null = null;
       if (billable) {
@@ -1871,6 +1874,33 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
         });
         if (existingInvoice) {
           invoice = existingInvoice;
+          const existingInvoicePayload = parsePayload(existingInvoice.payload);
+          const invoiceTotal = Number(existingInvoicePayload.total ?? existingInvoicePayload.amount ?? 0);
+          const invoicePosting = sqlite.prepare(
+            "SELECT id FROM financial_transactions WHERE source_kind = 'invoice' AND source_id = ? AND status = 'posted' LIMIT 1",
+          ).get(existingInvoice.id) as { id: number } | undefined;
+          if (invoiceTotal > 0 && !invoicePosting) {
+            const issuedPayload = {
+              ...existingInvoicePayload,
+              invoiceStatus: "due",
+              lifecycleStatus: "due",
+              paymentStatus: Number(existingInvoicePayload.paid ?? 0) > 0 ? "partially_paid" : "unpaid",
+            };
+            invoice = tx.update(containerSystemRecordsTable).set({
+              status: "due",
+              payload: JSON.stringify(issuedPayload),
+              updatedAt: now,
+            }).where(eq(containerSystemRecordsTable.id, existingInvoice.id)).returning().get();
+            postToFinancialCoreInTransaction({
+              sourceKind: "invoice",
+              sourceId: invoice.id,
+              reference: invoice.reference,
+              amount: invoiceTotal,
+              date: String(issuedPayload.date ?? now).slice(0, 10),
+              operationKey: String(issuedPayload.operationKey ?? ""),
+              createdBy: adminReq.adminId,
+            });
+          }
         } else {
           const subtotal = Number(contractPayload.amount ?? 0);
           const taxRate = Number(contractPayload.taxRate ?? 0);
@@ -1937,7 +1967,7 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
           };
           const insertedInvoice = tx.insert(containerSystemRecordsTable).values({
             kind: "invoice",
-            status: "draft",
+            status: "due",
             reference: referenceFor("invoice", invoicePayload, Date.now()),
             payload: JSON.stringify(invoicePayload),
             operationKey: invoiceOperationKey,
@@ -1949,6 +1979,15 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
             payload: JSON.stringify({ ...invoicePayload, invoiceNumber, qrCodeData: JSON.stringify({ invoiceNumber, recordId: insertedInvoice.id, total, date: invoicePayload.date }) }),
             updatedAt: now,
           }).where(eq(containerSystemRecordsTable.id, insertedInvoice.id)).returning().get();
+          postToFinancialCoreInTransaction({
+            sourceKind: "invoice",
+            sourceId: invoice.id,
+            reference: invoiceNumber,
+            amount: total,
+            date: String(invoicePayload.date ?? now).slice(0, 10),
+            operationKey: invoiceOperationKey,
+            createdBy: adminReq.adminId,
+          });
           tx.insert(containerSystemAuditTable).values({
             recordId: invoice.id,
             kind: "invoice",

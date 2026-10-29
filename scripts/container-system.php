@@ -159,12 +159,81 @@ function hsServiceRequestMutationIssue(PDO $pdo, array $request, array $input): 
     return null;
 }
 
+function hsSplitLocationText($value, $explicitCoordinates = null): array {
+    $raw = trim((string)($value ?? ''));
+    $explicit = trim((string)($explicitCoordinates ?? ''));
+    $coordinatePattern = '/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/';
+    $markerPattern = '/(?:إحداثيات\s*GPS|GPS)\s*[:：]\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/iu';
+    $lat = null;
+    $lng = null;
+    $match = [];
+    if (preg_match($coordinatePattern, $explicit, $match)) {
+        $lat = (float)$match[1];
+        $lng = (float)$match[2];
+    } elseif (preg_match($markerPattern, $raw, $match)) {
+        $lat = (float)$match[1];
+        $lng = (float)$match[2];
+    } elseif (preg_match($coordinatePattern, $raw, $match)) {
+        $lat = (float)$match[1];
+        $lng = (float)$match[2];
+    }
+    $coordinates = $lat !== null && $lng !== null && abs($lat) <= 90 && abs($lng) <= 180
+        ? rtrim(rtrim(number_format($lat, 8, '.', ''), '0'), '.') . ',' . rtrim(rtrim(number_format($lng, 8, '.', ''), '0'), '.')
+        : '';
+    $address = preg_match($markerPattern, $raw)
+        ? trim((string)preg_replace('/\s*\(?\s*(?:إحداثيات\s*GPS|GPS)\s*[:：]\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\)?/iu', '', $raw), " \t\n\r\0\x0B,،()")
+        : (preg_match($coordinatePattern, $raw) ? '' : $raw);
+    return ['address' => $address, 'coordinates' => $coordinates];
+}
+
+function hsEncodeLocationText($value, $explicitCoordinates = null): string {
+    $raw = trim((string)($value ?? ''));
+    $parts = hsSplitLocationText($raw, $explicitCoordinates);
+    if ($parts['coordinates'] === '') return $parts['address'] !== '' ? $parts['address'] : $raw;
+    return $parts['address'] . "\nإحداثيات GPS: " . $parts['coordinates'];
+}
+
+function hsCleanLocationPayload(array $payload): array {
+    $fields = [
+        'location' => 'locationCoordinates',
+        'address' => 'addressCoordinates',
+        'serviceAddress' => 'serviceAddressCoordinates',
+        'customerAddress' => 'customerAddressCoordinates',
+        'currentLocation' => 'currentLocationCoordinates',
+        'siteAddress' => 'siteAddressCoordinates',
+    ];
+    foreach ($fields as $field => $coordinateField) {
+        if (!isset($payload[$field]) || !is_string($payload[$field])) continue;
+        $explicit = $payload[$coordinateField] ?? ($field === 'location' ? ($payload['locationCoordinates'] ?? null) : null);
+        $parts = hsSplitLocationText($payload[$field], $explicit);
+        if ($parts['coordinates'] !== '' && empty($payload[$coordinateField])) $payload[$coordinateField] = $parts['coordinates'];
+        $payload[$field] = $parts['address'] !== '' ? $parts['address'] : ($parts['coordinates'] !== '' ? 'الموقع المحدد' : trim($payload[$field]));
+    }
+    return $payload;
+}
+
+function hsRefreshPrivateUploadUrl($value): ?string {
+    $raw = trim((string)($value ?? ''));
+    if ($raw === '') return null;
+    $path = parse_url($raw, PHP_URL_PATH);
+    if (!is_string($path) || !preg_match('#^/api/private-uploads/([^/?#]+)$#', $path, $match)) return $raw;
+    $filename = rawurldecode($match[1]);
+    $secret = trim((string)getenv('SESSION_SECRET'));
+    if ($secret === '' || !preg_match('/^[A-Za-z0-9._-]+$/', $filename)) return $raw;
+    $expires = time() + 30 * 60;
+    $signature = rtrim(strtr(base64_encode(hash_hmac('sha256', $filename . '.' . $expires, $secret, true)), '+/', '-_'), '=');
+    return '/api/private-uploads/' . rawurlencode($filename) . '?expires=' . $expires . '&signature=' . rawurlencode($signature);
+}
+
 function hsRecord(array $row): array {
     $row['id'] = (int)$row['id'];
     $row['createdBy'] = isset($row['created_by']) ? (int)$row['created_by'] : null;
     $row['createdAt'] = $row['created_at'] ?? null;
     $row['updatedAt'] = $row['updated_at'] ?? null;
-    $row['payload'] = hsPayload($row['payload'] ?? null);
+    $row['payload'] = hsCleanLocationPayload(hsPayload($row['payload'] ?? null));
+    foreach (['driverProofPhotoUrl', 'proofPhotoUrl'] as $photoField) {
+        if (!empty($row['payload'][$photoField])) $row['payload'][$photoField] = hsRefreshPrivateUploadUrl($row['payload'][$photoField]);
+    }
     unset($row['created_by'], $row['created_at'], $row['updated_at']);
     return $row;
 }
@@ -2049,7 +2118,8 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                 ->execute([':reference' => $workOrderPayload['workOrderNumber'], ':id' => $workOrderId]);
             $invoiceRow = null;
             $billingEnabled = !in_array(strtolower(trim((string)($contract['billingEnabled'] ?? 'true'))), ['false', '0', 'no'], true);
-            if ($billingEnabled) {
+            $contractValue = (float)($contract['total'] ?? $contract['amount'] ?? 0);
+            if ($billingEnabled && $contractValue > 0) {
                 $allRows = hsFindRecords($pdo);
                 $billingPeriod = substr((string)($contract['billingPeriod'] ?? $contract['startDate'] ?? $now), 0, 7);
                 $invoiceOperationKey = "contract-{$contractId}-period-{$billingPeriod}";
@@ -2086,7 +2156,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                         'description' => $lineDescription, 'quantity' => 1, 'unitPrice' => $subtotal, 'lineItems' => [$lineItem],
                         'contractTerms' => is_array($contract['contractTerms'] ?? null) ? $contract['contractTerms'] : [],
                     ];
-                    $invoiceInsert = $pdo->prepare("INSERT INTO container_system_records (kind, status, reference, payload, operation_key, created_by, created_at, updated_at) VALUES ('invoice', 'draft', '', :payload, :operation_key, :created_by, :created_at, :updated_at)");
+                    $invoiceInsert = $pdo->prepare("INSERT INTO container_system_records (kind, status, reference, payload, operation_key, created_by, created_at, updated_at) VALUES ('invoice', 'due', '', :payload, :operation_key, :created_by, :created_at, :updated_at)");
                     $invoiceInsert->execute([':payload' => json_encode($invoicePayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':operation_key' => $invoiceOperationKey, ':created_by' => $actorId, ':created_at' => $now, ':updated_at' => $now]);
                     $invoiceId = (int)$pdo->lastInsertId();
                     $invoiceNumber = 'INV-' . str_pad((string)$invoiceId, 5, '0', STR_PAD_LEFT);
@@ -2094,6 +2164,28 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                     $invoicePayload['qrCodeData'] = json_encode(['invoiceNumber' => $invoiceNumber, 'recordId' => $invoiceId, 'total' => $total, 'date' => $invoicePayload['date']], JSON_UNESCAPED_UNICODE);
                     $pdo->prepare("UPDATE container_system_records SET reference = :reference, payload = :payload, updated_at = :updated_at WHERE id = :id")->execute([':reference' => $invoiceNumber, ':payload' => json_encode($invoicePayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':updated_at' => $now, ':id' => $invoiceId]);
                     $invoiceRow = $find($pdo, $invoiceId);
+                } else {
+                    $invoiceRow = $existingInvoice[0];
+                }
+                if ($invoiceRow) {
+                    $invoicePayloadForPosting = hsPayload($invoiceRow['payload'] ?? null);
+                    $invoiceTotalForPosting = (float)($invoicePayloadForPosting['total'] ?? $invoicePayloadForPosting['amount'] ?? 0);
+                    if ($invoiceTotalForPosting > 0) {
+                        $postingCheck = $pdo->prepare("SELECT id FROM financial_transactions WHERE source_kind = 'invoice' AND source_id = ? AND status = 'posted' LIMIT 1");
+                        $postingCheck->execute([(int)$invoiceRow['id']]);
+                        if (!$postingCheck->fetchColumn()) {
+                            $invoicePayloadForPosting['invoiceStatus'] = 'due';
+                            $invoicePayloadForPosting['lifecycleStatus'] = 'due';
+                            $invoicePayloadForPosting['paymentStatus'] = (float)($invoicePayloadForPosting['paid'] ?? 0) > 0 ? 'partially_paid' : 'unpaid';
+                            $invoicePayloadForPosting['amount'] = (float)($invoicePayloadForPosting['amount'] ?? $invoiceTotalForPosting);
+                            $pdo->prepare("UPDATE container_system_records SET status='due',payload=:payload,updated_at=:updated_at WHERE id=:id")
+                                ->execute([':payload' => json_encode($invoicePayloadForPosting, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':updated_at' => $now, ':id' => (int)$invoiceRow['id']]);
+                            $postingPayload = $invoicePayloadForPosting;
+                            $postingPayload['amount'] = $invoiceTotalForPosting;
+                            hsPostFinancialCore($pdo, 'invoice', (int)$invoiceRow['id'], $postingPayload, (string)($invoiceRow['reference'] ?? ''), $actorId);
+                            $invoiceRow = $find($pdo, (int)$invoiceRow['id']);
+                        }
+                    }
                 }
             }
             $pdo->commit();

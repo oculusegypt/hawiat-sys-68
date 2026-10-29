@@ -5,11 +5,20 @@ const PRIVATE_UPLOAD_PATTERN = /^\/api\/private-uploads\/([^/?#]+)$/;
 export function refreshPrivateUploadUrl(value: unknown): string | null {
   const raw = String(value ?? "").trim();
   if (!raw) return null;
-  if (!raw.startsWith("/api/private-uploads/")) return raw;
-
-  const path = raw.split("?")[0];
+  let path = raw;
+  try {
+    path = new URL(raw, "https://private-upload.invalid").pathname;
+  } catch {
+    return raw;
+  }
+  if (!path.startsWith("/api/private-uploads/")) return raw;
   const match = path.match(PRIVATE_UPLOAD_PATTERN);
-  const filename = match ? decodeURIComponent(match[1]) : "";
+  let filename = "";
+  try {
+    filename = match ? decodeURIComponent(match[1]) : "";
+  } catch {
+    return raw;
+  }
   const secret = process.env.SESSION_SECRET;
   if (!filename || !/^[a-zA-Z0-9._-]+$/.test(filename) || !secret) return raw;
 

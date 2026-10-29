@@ -15,6 +15,7 @@ import { DraggableMapPicker } from "@/components/ui/DraggableMapPicker"
 import { useSiteSettings } from "@/context/SiteSettingsContext"
 import { getContainerValue, getContainersForCategory } from "@/lib/packageOptions"
 import { getVisitorTracking } from "@/lib/visitorAttribution"
+import { locationTextWithCoordinates } from "@/lib/location"
 import {
   DEBRIS_RENTAL_DURATION,
   REQUEST_CATEGORY_LABELS,
@@ -64,12 +65,14 @@ export function ServiceRequestForm() {
   // Quote request state
   const [showQuoteForm, setShowQuoteForm] = useState(false)
   const [quoteForm, setQuoteForm] = useState({ name: "", phone: "", serviceType: "", containerSize: "", location: "", notes: "", activityType: "", monthlyEvacuations: "" })
+  const [quoteLocationCoordinates, setQuoteLocationCoordinates] = useState("")
   const [quoteErrors, setQuoteErrors] = useState<{ name?: string; phone?: string }>({})
   const [isQuoteSubmitting, setIsQuoteSubmitting] = useState(false)
   const [quoteSuccess, setQuoteSuccess] = useState(false)
   const [quoteOrderId, setQuoteOrderId] = useState<number | null>(null)
   const [quoteMapOpen, setQuoteMapOpen] = useState(false)
   const [mainMapOpen, setMainMapOpen] = useState(false)
+  const [mainLocationCoordinates, setMainLocationCoordinates] = useState("")
 
   // Load site settings (lock status)
   useEffect(() => {
@@ -126,7 +129,7 @@ export function ServiceRequestForm() {
           phone: quoteForm.phone,
           serviceType: quoteForm.serviceType || "طلب عرض سعر حاويات",
           containerSize: quoteForm.containerSize || null,
-          location: quoteForm.location || "غير محدد",
+          location: locationTextWithCoordinates(quoteForm.location || "غير محدد", quoteLocationCoordinates),
           notes: notesText,
           appointmentType: "immediate",
           tracking: getVisitorTracking(),
@@ -156,6 +159,7 @@ export function ServiceRequestForm() {
 
     const payload = {
        ...values,
+       location: locationTextWithCoordinates(values.location, mainLocationCoordinates),
        duration: values.duration || getDefaultRequestDuration(requestCategory),
        notes: `عدد الوحدات المطلوبة: ${values.containerCount}`,
        appointmentType: "immediate",
@@ -313,7 +317,10 @@ export function ServiceRequestForm() {
                   <input
                     type="text"
                     value={quoteForm.location}
-                    onChange={e => setQuoteForm(prev => ({ ...prev, location: e.target.value }))}
+                    onChange={e => {
+                      setQuoteForm(prev => ({ ...prev, location: e.target.value }))
+                      setQuoteLocationCoordinates("")
+                    }}
                     placeholder="مثال: الرياض - حي الملقا"
                     className="w-full text-sm border rounded-xl p-2.5 bg-white"
                   />
@@ -326,7 +333,8 @@ export function ServiceRequestForm() {
                         initialLat={24.7136}
                         initialLng={46.6753}
                         onConfirm={(address, lat, lng) => {
-                          if (address) setQuoteForm(prev => ({ ...prev, location: `${address} (إحداثيات GPS: ${lat.toFixed(6)}, ${lng.toFixed(6)})` }))
+                          setQuoteForm(prev => ({ ...prev, location: address || "الموقع المحدد" }))
+                          setQuoteLocationCoordinates(`${lat},${lng}`)
                           setQuoteMapOpen(false)
                         }}
                       />
@@ -553,7 +561,15 @@ export function ServiceRequestForm() {
                     <FormItem>
                       <FormLabel className="text-sm font-bold text-gray-700">موقع المشروع / الحي في الرياض *</FormLabel>
                       <FormControl>
-                        <Input placeholder="مثال: الرياض - حي الملقا - شارع أنس بن مالك" className="rounded-xl border-gray-200 focus:border-primary focus:ring-primary h-12" {...field} />
+                         <Input
+                           placeholder="مثال: الرياض - حي الملقا - شارع أنس بن مالك"
+                           className="rounded-xl border-gray-200 focus:border-primary focus:ring-primary h-12"
+                           {...field}
+                           onChange={event => {
+                             field.onChange(event)
+                             setMainLocationCoordinates("")
+                           }}
+                         />
                       </FormControl>
                       <button type="button" onClick={() => setMainMapOpen(value => !value)} className="mt-2 inline-flex items-center gap-1.5 text-xs font-bold text-primary hover:underline">
                         <Navigation size={13} /> {mainMapOpen ? "إخفاء الخريطة" : "تحديد الموقع من الخريطة"}
@@ -564,7 +580,8 @@ export function ServiceRequestForm() {
                             initialLat={24.7136}
                             initialLng={46.6753}
                             onConfirm={(address, lat, lng) => {
-                              if (address) form.setValue("location", `${address} (إحداثيات GPS: ${lat.toFixed(6)}, ${lng.toFixed(6)})`, { shouldValidate: true })
+                              form.setValue("location", address || "الموقع المحدد", { shouldValidate: true })
+                              setMainLocationCoordinates(`${lat},${lng}`)
                               setMainMapOpen(false)
                             }}
                           />

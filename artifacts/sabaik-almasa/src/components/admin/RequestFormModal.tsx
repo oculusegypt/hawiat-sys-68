@@ -25,6 +25,7 @@ import {
   type LucideIcon,
 } from "lucide-react"
 import { DraggableMapPicker } from "@/components/ui/DraggableMapPicker"
+import { locationTextWithCoordinates, parseLocationCoordinates } from "@/lib/location"
 
 // ─── icon map (matches DB icon strings) ──────────────────────────────────────
 const ICON_MAP: Record<string, LucideIcon> = {
@@ -56,6 +57,7 @@ interface ServiceRequest {
   serviceType: string
   containerSize: string
   location: string
+  locationCoordinates?: string | null
   duration?: string | null
   notes?: string | null
   appointmentType?: string | null
@@ -95,6 +97,7 @@ export default function RequestFormModal({ open, onClose, request, onSuccess }: 
   const [newCustomerEmail, setNewCustomerEmail] = useState("")
   const [customerMessage, setCustomerMessage] = useState("")
   const [mapOpen, setMapOpen] = useState(false)
+  const [locationCoordinates, setLocationCoordinates] = useState("")
   const { data: containers = [] } = useGetContainers()
   const { data: customerRecords = [], isLoading: customersLoading } =
     useGetContainerSystemRecords({ kind: "customer" })
@@ -110,6 +113,8 @@ export default function RequestFormModal({ open, onClose, request, onSuccess }: 
 
   useEffect(() => {
     if (request) {
+      const coordinates = parseLocationCoordinates(request.locationCoordinates ?? request.location)
+      setLocationCoordinates(coordinates ? `${coordinates.lat},${coordinates.lng}` : "")
       reset({
         clientName:      request.clientName ?? "",
         phone:           request.phone ?? "",
@@ -125,6 +130,7 @@ export default function RequestFormModal({ open, onClose, request, onSuccess }: 
         adminNotes:      request.adminNotes ?? "",
       })
     } else {
+      setLocationCoordinates("")
       reset({
         clientName: "", phone: "", email: "", serviceType: "", containerSize: "",
         location: "", duration: "", notes: "", appointmentType: "immediate",
@@ -204,7 +210,7 @@ export default function RequestFormModal({ open, onClose, request, onSuccess }: 
       email:           values.email || null,
       serviceType:     values.serviceType,
       containerSize:   selectedService?.category ? values.containerSize || null : "غير محدد",
-      location:        values.location,
+      location:        locationTextWithCoordinates(values.location, locationCoordinates),
       duration:        values.duration || null,
       notes:           values.notes || null,
       appointmentType: values.appointmentType,
@@ -387,7 +393,14 @@ export default function RequestFormModal({ open, onClose, request, onSuccess }: 
           {/* ══ 4. DURATION + LOCATION ══════════════════════════════════════════ */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="موقع المشروع *">
-              <Input {...register("location", { required: true })} placeholder="الرياض - حي النزهة" />
+              <Input
+                {...register("location", { required: true })}
+                onChange={event => {
+                  setValue("location", event.target.value, { shouldValidate: true })
+                  setLocationCoordinates("")
+                }}
+                placeholder="الرياض - حي النزهة"
+              />
             <button type="button" onClick={() => setMapOpen(value => !value)} className="mt-2 inline-flex items-center gap-1.5 text-xs font-bold text-primary hover:underline">
               <Navigation size={13} /> {mapOpen ? "إخفاء الخريطة" : "تحديد الموقع من الخريطة"}
             </button>
@@ -397,7 +410,8 @@ export default function RequestFormModal({ open, onClose, request, onSuccess }: 
                   initialLat={24.7136}
                   initialLng={46.6753}
                   onConfirm={(address, lat, lng) => {
-                    if (address) setValue("location", `${address} (إحداثيات GPS: ${lat.toFixed(6)}, ${lng.toFixed(6)})`, { shouldValidate: true })
+                    setValue("location", address || "الموقع المحدد", { shouldValidate: true })
+                    setLocationCoordinates(`${lat},${lng}`)
                     setMapOpen(false)
                   }}
                 />
