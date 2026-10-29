@@ -1981,7 +1981,7 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
       }
       if (!isAssetlessContract && asset) {
         const assetAvailability = canonicalAssetStatus(assetPayload.status ?? asset.status, asset.status);
-        if (!["available", "reserved", "active"].includes(assetAvailability)) throw new Error("الحاوية ليست متاحة للتخصيص");
+      if (assetAvailability !== "available") throw new Error("الحاوية ليست متاحة للتخصيص");
       }
       contractPayload.siteRecordId = siteId;
       assignmentPayload.siteRecordId = siteId;
@@ -2455,6 +2455,18 @@ router.post("/admin/container-system/financial/settle", requireContainerPermissi
   if (Math.abs(allocationTotal - amount) > 0.01) return res.status(422).json({ error: "يجب أن يساوي مجموع التوزيعات مبلغ التحصيل بالكامل" });
   if (new Set(allocations.map(item => item.contractId)).size !== allocations.length) {
     return res.status(422).json({ error: "لا تكرر العقد؛ اجمع مبلغه في توزيع واحد" });
+  }
+  for (const allocation of allocations) {
+    if (allocation.invoiceId === null) continue;
+    const invoice = allRecords.find(row =>
+      row.id === allocation.invoiceId && row.kind === "invoice" && row.status !== "archived",
+    );
+    const contract = allRecords.find(row =>
+      row.id === allocation.contractId && row.kind === "contract" && row.status !== "archived",
+    );
+    if (invoice && contract && !invoiceBelongsToContract(invoice, contract)) {
+      return res.status(422).json({ error: "الفاتورة لا تتبع العقد المحدد" });
+    }
   }
   const existing = await findByOperationKey("payment", operationKey);
   if (existing) {
@@ -3115,13 +3127,23 @@ router.post("/admin/container-system/records", async (req, res) => {
     if (!contract || !asset || !site) return res.status(422).json({ error: "العقد أو الحاوية أو موقع العميل غير موجود" });
     const contractPayload = parsePayload(contract.payload);
     const sitePayload = parsePayload(site.payload);
+    const rentalPrice = Number(payload.unitPrice);
+    if (!Number.isFinite(rentalPrice) || rentalPrice <= 0) {
+      return res.status(422).json({ error: "سعر إيجار الحاوية لكل دورة فوترة مطلوب ويجب أن يكون أكبر من صفر" });
+    }
+    payload.unitPrice = Math.round(rentalPrice * 100) / 100;
+    const billingEnabled = !["false", "0", "no", "free", "non_billable"].includes(String(contractPayload.billingEnabled ?? "true").trim().toLowerCase());
+    const contractBillable = !["false", "0", "no", "free", "non_billable"].includes(String(contractPayload.billable ?? "true").trim().toLowerCase());
+    if (!billingEnabled || !contractBillable) {
+      return res.status(422).json({ error: "العقد غير قابل للفوترة؛ لا يمكن إضافة حاوية إيجارية إليه" });
+    }
     if (Number(contractPayload.customerRecordId) !== Number(sitePayload.customerRecordId)) {
       return res.status(409).json({ error: "موقع التخصيص لا يتبع عميل العقد" });
     }
     if (!["active", "approved", "issued", "scheduled", "delivered"].includes(contract.status)) {
       return res.status(409).json({ error: "لا يمكن تخصيص حاوية لعقد غير نشط" });
     }
-    if (!["available", "reserved"].includes(canonicalAssetStatus(asset.status, asset.status))) {
+    if (canonicalAssetStatus(parsePayload(asset.payload).status ?? asset.status, asset.status) !== "available") {
       return res.status(409).json({ error: "الحاوية ليست متاحة للتخصيص" });
     }
     const activeAssignment = records.find(record =>
@@ -3233,7 +3255,8 @@ router.post("/admin/container-system/records", async (req, res) => {
         if (Number(contractPayload.customerRecordId) !== Number(sitePayload.customerRecordId)) {
           throw new Error("موقع التخصيص لا يتبع عميل العقد");
         }
-        if (!["available", "reserved"].includes(canonicalAssetStatus(asset.status, asset.status))) {
+        const liveAssetPayload = parsePayload(asset.payload);
+        if (canonicalAssetStatus(liveAssetPayload.status ?? asset.status, asset.status) !== "available") {
           throw new Error("الحاوية ليست متاحة للتخصيص");
         }
         const activeAssignment = rows.find(row =>
@@ -3321,10 +3344,196 @@ router.post("/admin/container-system/records", async (req, res) => {
             : []),
           ...(primaryContainerId > 0 && primaryContainerId !== assetId ? [assetId] : []),
         ])];
+        const enteredPrice = Math.round(Number(payload.unitPrice) * 100) / 100;
+        const taxRate = Math.max(Number(contractPayload.taxRate ?? 0), 0);
+        const taxEnabled = contractPayload.taxEnabled === true ||
+          ["true", "1", "yes", "نعم"].includes(String(contractPayload.taxEnabled ?? "").trim().toLowerCase());
+        const taxInclusive = taxEnabled && (
+          contractPayload.taxInclusive === true ||
+          ["true", "1", "yes", "نعم"].includes(String(contractPayload.taxInclusive ?? "").trim().toLowerCase())
+        );
+        const amount = taxInclusive && taxRate > 0
+          ? Math.round((enteredPrice / (1 + taxRate / 100)) * 100) / 100
+          : enteredPrice;
+        const taxAmount = taxEnabled
+          ? taxInclusive
+            ? Math.round((enteredPrice - amount) * 100) / 100
+            : Math.round((amount * taxRate / 100) * 100) / 100
+          : 0;
+        const lineTotal = taxInclusive
+          ? enteredPrice
+          : Math.round((amount + taxAmount) * 100) / 100;
+        const billingFrequency = String(contractPayload.billingFrequency ?? "monthly");
+        const billingPeriod = scheduleDate.slice(0, 7);
+        const assetTypeId = Number(liveAssetPayload.containerTypeId ?? liveAssetPayload.containerTypeRecordId ?? 0) || null;
+        const assetTypeName = String(liveAssetPayload.typeName ?? liveAssetPayload.containerType ?? liveAssetPayload.size ?? "");
+        const lineName = `إيجار حاوية ${assetCodeOf({ ...liveAssetPayload, reference: asset.reference })}${assetTypeName ? ` — ${assetTypeName}` : ""}`;
+        const contractLinePayload = {
+          contractRecordId,
+          contractNumber,
+          customerRecordId: Number(contractPayload.customerRecordId) || null,
+          customerName: String(contractPayload.customerName ?? ""),
+          siteRecordId: Number(payload.siteRecordId),
+          containerRecordId: assetId,
+          containerCode: assetCodeOf({ ...liveAssetPayload, reference: asset.reference }),
+          containerTypeId: assetTypeId,
+          containerAssignmentRecordId: inserted.id,
+          assignmentRecordId: inserted.id,
+          lineName,
+          serviceType: "إيجار حاوية",
+          quantity: 1,
+          unitPrice: enteredPrice,
+          amount,
+          taxRate,
+          taxEnabled,
+          taxInclusive,
+          taxAmount,
+          lineTotal,
+          total: lineTotal,
+          billingFrequency,
+          billingPeriod,
+          startDate: scheduleDate,
+          effectiveStartDate: scheduleDate,
+          endDate: String(contractPayload.endDate ?? scheduleDate),
+          status: "active",
+          isTemplate: false,
+        };
+        const rentalLine = tx.insert(containerSystemRecordsTable).values({
+          kind: "contract_line",
+          status: "active",
+          reference: referenceFor("contract_line", contractLinePayload, Date.now()),
+          payload: JSON.stringify(contractLinePayload),
+          createdBy: adminReq.adminId,
+        }).returning().get();
+        const invoiceOperationKey = `container-assignment-${inserted.id}-invoice`;
+        const invoiceLine = {
+          description: lineName,
+          containerRecordId: assetId,
+          containerCode: contractLinePayload.containerCode,
+          containerType: assetTypeName,
+          contractLineRecordId: rentalLine.id,
+          contractLineId: rentalLine.id,
+          quantity: 1,
+          unitPrice: enteredPrice,
+          amount,
+          subtotal: amount,
+          taxRate,
+          taxEnabled,
+          taxInclusive,
+          taxAmount,
+          total: lineTotal,
+          billingFrequency,
+          billingPeriod,
+          startDate: scheduleDate,
+          endDate: String(contractPayload.endDate ?? scheduleDate),
+        };
+        const invoicePayload = {
+          invoiceType: "standard",
+          invoiceStatus: "due",
+          lifecycleStatus: "due",
+          paymentStatus: "unpaid",
+          source: "contract_container_assignment",
+          contractRecordId,
+          contractNumber,
+          customerRecordId: Number(contractPayload.customerRecordId) || null,
+          customerName: String(contractPayload.customerName ?? ""),
+          customerPhone: String(contractPayload.customerPhone ?? ""),
+          customerTaxNumber: String(contractPayload.customerTaxNumber ?? ""),
+          siteRecordId: Number(payload.siteRecordId),
+          containerRecordId: assetId,
+          containerCode: contractLinePayload.containerCode,
+          containerType: assetTypeName,
+          contractLineRecordId: rentalLine.id,
+          assignmentRecordId: inserted.id,
+          billingPeriod,
+          billingFrequency,
+          startDate: scheduleDate,
+          endDate: String(contractPayload.endDate ?? scheduleDate),
+          amount,
+          subtotal: amount,
+          taxRate,
+          taxEnabled,
+          taxInclusive,
+          taxAmount,
+          total: lineTotal,
+          paid: 0,
+          remaining: lineTotal,
+          operationKey: invoiceOperationKey,
+          date: now.slice(0, 10),
+          description: lineName,
+          quantity: 1,
+          unitPrice: enteredPrice,
+          lineItems: [invoiceLine],
+          contractTerms: Array.isArray(contractPayload.contractTerms) ? contractPayload.contractTerms : [],
+        };
+        const insertedInvoice = tx.insert(containerSystemRecordsTable).values({
+          kind: "invoice",
+          status: "due",
+          reference: referenceFor("invoice", invoicePayload, Date.now()),
+          payload: JSON.stringify(invoicePayload),
+          operationKey: invoiceOperationKey,
+          createdBy: adminReq.adminId,
+        }).returning().get();
+        const invoiceNumber = generatedDocumentNumber("invoice", insertedInvoice.id);
+        const invoice = tx.update(containerSystemRecordsTable).set({
+          reference: invoiceNumber,
+          payload: JSON.stringify({
+            ...invoicePayload,
+            invoiceNumber,
+            qrCodeData: JSON.stringify({ invoiceNumber, recordId: insertedInvoice.id, total: lineTotal, date: invoicePayload.date }),
+          }),
+          updatedAt: now,
+        }).where(eq(containerSystemRecordsTable.id, insertedInvoice.id)).returning().get();
+        postToFinancialCoreInTransaction({
+          sourceKind: "invoice",
+          sourceId: invoice.id,
+          reference: invoiceNumber,
+          amount: lineTotal,
+          date: String(invoicePayload.date),
+          operationKey: invoiceOperationKey,
+          createdBy: adminReq.adminId,
+        });
+        const currentAssignmentPayload = parsePayload(current.payload);
+        current = tx.update(containerSystemRecordsTable).set({
+          payload: JSON.stringify({
+            ...currentAssignmentPayload,
+            contractLineRecordId: rentalLine.id,
+            invoiceRecordId: invoice.id,
+            billedAmount: lineTotal,
+            billingFrequency,
+          }),
+          updatedAt: now,
+        }).where(eq(containerSystemRecordsTable.id, inserted.id)).returning().get();
+        const previousAmount = Number(contractPayload.amount ?? 0);
+        const previousTax = Number(contractPayload.taxAmount ?? Math.max(Number(contractPayload.total ?? previousAmount) - previousAmount, 0));
+        const previousTotal = Number(contractPayload.total ?? previousAmount + previousTax);
+        const contractLineRecordIds = [...new Set([
+          ...(Array.isArray(contractPayload.contractLineRecordIds)
+            ? contractPayload.contractLineRecordIds.map(Number).filter(id => id > 0)
+            : []),
+          rentalLine.id,
+        ])];
+        const contractInvoiceRecordIds = [...new Set([
+          ...(Array.isArray(contractPayload.contractInvoiceRecordIds)
+            ? contractPayload.contractInvoiceRecordIds.map(Number).filter(id => id > 0)
+            : []),
+          invoice.id,
+        ])];
         const nextContractPayload = {
           ...contractPayload,
+          amount: Math.round((previousAmount + amount) * 100) / 100,
+          taxAmount: Math.round((previousTax + taxAmount) * 100) / 100,
+          total: Math.round((previousTotal + lineTotal) * 100) / 100,
           containerAssignmentRecordIds,
           additionalContainerRecordIds,
+          contractLineRecordIds,
+          contractInvoiceRecordIds,
+          supplementalInvoiceRecordIds: [...new Set([
+            ...(Array.isArray(contractPayload.supplementalInvoiceRecordIds)
+              ? contractPayload.supplementalInvoiceRecordIds.map(Number).filter(id => id > 0)
+              : []),
+            invoice.id,
+          ])],
           latestContainerAssignmentRecordId: inserted.id,
           latestWorkOrderRecordId: workOrder.id,
           ...(primaryContainerId <= 0
@@ -3354,6 +3563,16 @@ router.post("/admin/container-system/records", async (req, res) => {
           recordId: workOrder.id, kind: "work_order", action: "create",
           afterPayload: JSON.stringify(workOrderPayload), actorId: adminReq.adminId,
         }).run();
+        tx.insert(containerSystemAuditTable).values([
+          {
+            recordId: rentalLine.id, kind: "contract_line", action: "create",
+            afterPayload: JSON.stringify(contractLinePayload), actorId: adminReq.adminId,
+          },
+          {
+            recordId: invoice.id, kind: "invoice", action: "create",
+            afterPayload: invoice.payload, actorId: adminReq.adminId,
+          },
+        ]).run();
       }
       if (kind === "container_movement") {
         const movementType = String(payload.movementType ?? "").toLowerCase();

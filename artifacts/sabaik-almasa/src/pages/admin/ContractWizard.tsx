@@ -9,6 +9,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { reverseGeocode } from "@/lib/reverseGeocode"
+import { normalizeContainerLifecycleStatus } from "@/lib/containerStatusVisuals"
 
 type ContractWizardProps = {
   open: boolean
@@ -439,16 +440,23 @@ export function ContractWizard({ open, records, initialCustomerId = null, initia
     () => records.filter(record => record.kind === "customer" && record.status !== "archived"),
     [records],
   )
+  const activeAssignmentContainerIds = useMemo(() => new Set(records
+    .filter(record => record.kind === "container_assignment" && record.status !== "archived")
+    .filter(record => ["reserved", "active"].includes(String(payloadOf(record).assignmentStatus ?? record.status).trim().toLowerCase()))
+    .map(record => Number(payloadOf(record).containerRecordId))
+    .filter(id => Number.isInteger(id) && id > 0)), [records])
   const containers = useMemo(
     () => records.filter(record => {
-      if (!["container", "container_asset"].includes(record.kind) || record.status === "archived" || !["available", "متاح", "active"].includes(record.status)) return false
-      if (!form.containerTypeId) return true
       const payload = payloadOf(record)
+      if (!["container", "container_asset"].includes(record.kind) || record.status === "archived" || activeAssignmentContainerIds.has(record.id)) return false
+      const status = normalizeContainerLifecycleStatus(payload.status ?? record.status)
+      if (status !== "available" && !(payload.status == null && record.status === "active")) return false
+      if (!form.containerTypeId) return true
       const selectedType = containerTypes.find(item => String(item.id) === form.containerTypeId)
       if (!selectedType) return false
       return assetMatchesContainerType(payload, selectedType)
     }),
-    [containerTypes, form.containerTypeId, records],
+    [activeAssignmentContainerIds, containerTypes, form.containerTypeId, records],
   )
   const rentalLines = useMemo(
     () => {
