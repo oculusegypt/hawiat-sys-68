@@ -15,6 +15,11 @@ import { getContainerOperationalStatus } from "@/lib/containerStatusVisuals"
 import { ContractWizard } from "./ContractWizard"
 import { useToast } from "@/hooks/use-toast"
 import { findOpenContainerOperation } from "@/lib/containerOperationState"
+import {
+  contractDisplayNumber,
+  invoiceContractDisplayNumber,
+  invoiceContractForRecord,
+} from "@/lib/containerFinancialRelations"
 
 const API_BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") || ""
 
@@ -75,8 +80,14 @@ const collectionAmountForInvoice = (record: ContainerSystemRecord, invoice: Cont
   const allocated = allocatedAmount(record, "invoiceId", invoice.id)
   if (allocated > 0) return allocated
   if (Array.isArray(payload.allocations)) return 0
-  return Number(payload.invoiceRecordId ?? 0) === invoice.id ||
-    text(payload.invoiceNumber, "") === text(invoicePayload.invoiceNumber ?? invoice.reference, "")
+  const directInvoiceId = Number(payload.invoiceRecordId ?? payload.invoiceId ?? 0)
+  if (directInvoiceId > 0) return directInvoiceId === invoice.id ? Number(payload.amount ?? 0) : 0
+  const paymentCustomerId = Number(payload.customerRecordId ?? 0)
+  const invoiceCustomerId = Number(invoicePayload.customerRecordId ?? 0)
+  if (paymentCustomerId > 0 && invoiceCustomerId > 0 && paymentCustomerId !== invoiceCustomerId) return 0
+  const paymentInvoiceNumber = text(payload.invoiceNumber, "")
+  const invoiceNumber = text(invoicePayload.invoiceNumber ?? invoice.reference, "")
+  return paymentInvoiceNumber && invoiceNumber && paymentInvoiceNumber === invoiceNumber
     ? Number(payload.amount ?? 0)
     : 0
 }
@@ -298,7 +309,16 @@ function RelatedRows({ title, records, empty = "لا توجد سجلات مرت�
 function CompletionEvidence({ items }: {
   items: Array<{ id: string | number; label: string; url?: string | null; receiver?: string | null; date?: string | null }>
 }) {
-  const evidence = items.filter(item => Boolean(item.url))
+  const evidenceByFile = new Map<string, (typeof items)[number]>()
+  const sourcePriority = (label: string) => label.includes("أمر التشغيل") ? 3 : label.includes("الطلب") ? 2 : 1
+  for (const item of items) {
+    if (!item.url) continue
+    const stablePath = item.url.split("?")[0].replace(/^https?:\/\/[^/]+/i, "")
+    const key = stablePath || String(item.id)
+    const existing = evidenceByFile.get(key)
+    if (!existing || sourcePriority(item.label) > sourcePriority(existing.label)) evidenceByFile.set(key, item)
+  }
+  const evidence = [...evidenceByFile.values()]
   if (evidence.length === 0) return null
   return <details className="group overflow-hidden rounded-2xl border border-emerald-200 bg-emerald-50/40 shadow-sm">
     <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-5 py-4 transition hover:bg-emerald-100/50 [&::-webkit-details-marker]:hidden">
@@ -327,10 +347,19 @@ function CompletionEvidence({ items }: {
   </details>
 }
 
-function InvoiceRows({ invoices, payments }: { invoices: ContainerSystemRecord[]; payments: ContainerSystemRecord[] }) {
+function InvoiceRows({
+  invoices,
+  payments,
+  contracts,
+}: {
+  invoices: ContainerSystemRecord[]
+  payments: ContainerSystemRecord[]
+  contracts: ContainerSystemRecord[]
+}) {
   const [, navigate] = useLocation()
   return <Card className="border-cyan-100 shadow-sm"><CardHeader className="border-b border-slate-100 px-5 py-4"><div className="flex items-center justify-between gap-3"><CardTitle className="text-base">الفواتير</CardTitle><span className="rounded-full bg-cyan-50 px-2.5 py-1 text-xs font-black text-cyan-800">{invoices.length}</span></div></CardHeader><CardContent className="p-0">{invoices.length === 0 ? <p className="p-8 text-center text-sm text-slate-500">لا توجد فواتير مرتبطة بهذا العميل.</p> : invoices.map(invoice => {
     const p = payloadOf(invoice)
+    const linkedContract = invoiceContractForRecord(invoice, contracts)
     const total = Number(p.total ?? p.amount ?? 0)
     const paid = canonicalCollections(payments).reduce((sum, payment) => sum + collectionAmountForInvoice(payment, invoice), 0)
     const remaining = Math.max(total - paid, 0)
@@ -338,7 +367,7 @@ function InvoiceRows({ invoices, payments }: { invoices: ContainerSystemRecord[]
     const status = remaining <= 0 && total > 0 ? "مدفوعة" : paid > 0 ? "مدفوعة جزئياً" : String(p.invoiceStatus ?? invoice.status) === "overdue" ? "متأخرة" : "مستحقة"
     return <button type="button" key={invoice.id} onClick={() => navigate(`/admin/container-system/invoice/${invoice.id}/details`)} className="grid w-full grid-cols-2 gap-3 border-b border-slate-100 px-5 py-4 text-right transition hover:bg-cyan-50/40 sm:grid-cols-[1.15fr_1fr_1fr_1fr_1fr]">
       <span><b className="block text-sm text-cyan-800" dir="ltr">{number}</b><small className="text-[11px] text-slate-400">{text(p.date, "—")}</small></span>
-      <span><small className="block text-[11px] text-slate-400">العقد</small><b className="text-xs">{text(p.contractNumber, "غير مرتبط")}</b></span>
+      <span><small className="block text-[11px] text-slate-400">العقد</small><b className="text-xs">{linkedContract ? contractDisplayNumber(linkedContract) : invoiceContractDisplayNumber(invoice, contracts)}</b></span>
       <span><small className="block text-[11px] text-slate-400">الحاوية</small><b className="text-xs" dir="ltr">#{text(p.containerCode)}</b></span>
       <span><small className="block text-[11px] text-slate-400">الإجمالي / المدفوع</small><b className="text-xs">{money(total)} <span className="font-normal text-emerald-700">({money(paid)})</span></b></span>
       <span className="col-span-2 sm:col-span-1"><small className="block text-[11px] text-slate-400">المتبقي والحالة</small><b className="text-xs text-rose-700">{money(remaining)} · {status}</b></span>
@@ -372,19 +401,35 @@ function CustomerProfile({ record, records }: { record: ContainerSystemRecord; r
   const name = text(p.name ?? p.customerName)
   const related = records.filter(item => {
     const payload = payloadOf(item)
-    return text(payload.customerName, "") === name || text(payload.customerRecordId, "") === String(record.id)
+    const customerId = Number(payload.customerRecordId ?? payload.customerId ?? 0)
+    if (customerId > 0) return customerId === record.id
+
+    const contractId = Number(payload.contractRecordId ?? payload.contractId ?? 0)
+    if (contractId > 0) {
+      const linkedContract = records.find(candidate => candidate.kind === "contract" && candidate.id === contractId)
+      if (!linkedContract) return false
+      const linkedCustomerId = Number(payloadOf(linkedContract).customerRecordId ?? 0)
+      return linkedCustomerId > 0
+        ? linkedCustomerId === record.id
+        : text(payloadOf(linkedContract).customerName, "") === name
+    }
+    return text(payload.customerName, "") === name
   })
   const contracts = related.filter(item => item.kind === "contract")
   const contractIds = new Set(contracts.map(item => item.id))
   const paymentInvoiceId = Number(new URLSearchParams(window.location.search).get("paymentInvoiceId") ?? 0)
-  const paymentInvoice = paymentInvoiceId > 0
+  const paymentInvoiceCandidate = paymentInvoiceId > 0
     ? records.find(item => item.kind === "invoice" && item.id === paymentInvoiceId && item.status !== "archived")
     : undefined
+  const paymentInvoice = paymentInvoiceCandidate && (
+    Number(payloadOf(paymentInvoiceCandidate).customerRecordId ?? 0) > 0
+      ? Number(payloadOf(paymentInvoiceCandidate).customerRecordId ?? 0) === record.id
+      : Boolean(invoiceContractForRecord(paymentInvoiceCandidate, contracts))
+  ) ? paymentInvoiceCandidate : undefined
   const paymentInvoicePayload = payloadOf(paymentInvoice)
-  const paymentInvoiceContract = contracts.find(item =>
-    item.id === Number(paymentInvoicePayload.contractRecordId ?? 0)
-    || text(payloadOf(item).contractNumber, "") === text(paymentInvoicePayload.contractNumber, ""),
-  )
+  const paymentInvoiceContract = paymentInvoice
+    ? invoiceContractForRecord(paymentInvoice, contracts)
+    : undefined
   const paymentInvoiceTotal = Number(paymentInvoicePayload.total ?? paymentInvoicePayload.amount ?? 0)
   const paymentInvoicePaid = Number(paymentInvoicePayload.paid ?? 0)
   const paymentInvoiceRemaining = Math.max(paymentInvoiceTotal - paymentInvoicePaid, 0)
@@ -415,7 +460,9 @@ function CustomerProfile({ record, records }: { record: ContainerSystemRecord; r
   const workOrdersQuery = useGetServiceRequests(undefined, { query: { queryKey: getGetServiceRequestsQueryKey(), staleTime: 30_000 } })
   const workOrders = (workOrdersQuery.data ?? []).filter(item => {
     const linked = item as typeof item & { customerRecordId?: number | null; contractRecordId?: number | null }
-    return linked.customerRecordId === record.id || (linked.contractRecordId != null && contractIds.has(linked.contractRecordId))
+    return linked.customerRecordId != null
+      ? linked.customerRecordId === record.id
+      : linked.contractRecordId != null && contractIds.has(linked.contractRecordId)
   })
   const operationalWorkOrders = related.filter(item => item.kind === "work_order")
   const completionEvidence = [
@@ -806,7 +853,7 @@ function CustomerProfile({ record, records }: { record: ContainerSystemRecord; r
        </Card>
      </div>
 
-     <InvoiceRows invoices={invoices} payments={payments.filter(item => item.kind === "payment" && item.status === "posted")} />
+      <InvoiceRows invoices={invoices} payments={payments.filter(item => item.kind === "payment" && item.status === "posted")} contracts={contracts} />
 
      <div className="grid gap-5 xl:grid-cols-2">
        <Card className="border-slate-200/80 shadow-sm">

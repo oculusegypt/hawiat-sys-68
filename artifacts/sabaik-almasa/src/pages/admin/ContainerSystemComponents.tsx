@@ -7,6 +7,10 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { PenLine, Plus, RotateCcw, Save, Trash2, X } from "lucide-react"
+import {
+  contractDisplayNumber,
+  invoiceBelongsToContract,
+} from "@/lib/containerFinancialRelations"
 
 const API_BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") || ""
 
@@ -1180,6 +1184,17 @@ export function RecordDialog({
       "",
   )
   const selectedPaymentCustomer = customers.find(item => String(item.id) === customerIdForPayment)
+  const selectedPaymentContracts = selectedPaymentCustomer
+    ? records.filter(item => {
+        if (item.kind !== "contract" || item.status === "archived") return false
+        const contractPayload = item.payload as Record<string, unknown>
+        const contractCustomerId = Number(contractPayload.customerRecordId ?? 0)
+        return contractCustomerId > 0
+          ? contractCustomerId === selectedPaymentCustomer.id
+          : String(contractPayload.customerName ?? "").trim() ===
+              String(selectedPaymentCustomer.payload.name ?? selectedPaymentCustomer.payload.customerName ?? "").trim()
+      })
+    : []
   const invoiceCustomer = isInvoice
     ? customers.find(item =>
         (payload.customerRecordId && String(item.id) === String(payload.customerRecordId)) ||
@@ -1200,11 +1215,15 @@ export function RecordDialog({
     : payload
   const invoiceCustomerId = invoiceCustomer?.id ? String(invoiceCustomer.id) : ""
   const invoiceContracts = isInvoice
-    ? records.filter(item => item.kind === "contract" && item.status !== "archived" && (
-        !invoiceCustomer ||
-        String((item.payload as Record<string, unknown>).customerRecordId ?? "") === String(invoiceCustomer.id) ||
-        String((item.payload as Record<string, unknown>).customerName ?? "").trim() === String(invoiceCustomer.payload.name ?? "").trim()
-      ))
+    ? records.filter(item => {
+        if (item.kind !== "contract" || item.status === "archived" || !invoiceCustomer) return false
+        const contractPayload = item.payload as Record<string, unknown>
+        const contractCustomerId = Number(contractPayload.customerRecordId ?? 0)
+        return contractCustomerId > 0
+          ? contractCustomerId === invoiceCustomer.id
+          : String(contractPayload.customerName ?? "").trim() ===
+              String(invoiceCustomer.payload.name ?? invoiceCustomer.payload.customerName ?? "").trim()
+      })
     : []
   const invoiceRequests = useMemo(() => isInvoice && invoiceCustomer
     ? serviceRequests.filter(request =>
@@ -1214,48 +1233,80 @@ export function RecordDialog({
           (!(request as ServiceRequest & { customerRecordId?: number }).customerRecordId && request.clientName.trim() === String(invoiceCustomerPayload?.name ?? "").trim())),
       )
     : [], [invoiceCustomer, invoiceCustomerPayload?.name, isInvoice, serviceRequests])
-  const invoiceContractNumbers = useMemo(() => new Map(
-    records.filter(item => item.kind === "invoice").map(item => {
-      const invoicePayload = item.payload as Record<string, unknown>
-      return [String(invoicePayload.invoiceNumber ?? item.reference ?? ""), String(invoicePayload.contractNumber ?? "")] as [string, string]
-    }).filter(([invoiceNumber, contractNumber]) => invoiceNumber && contractNumber),
-  ), [records])
-  const paidForContract = (contractNumber: string) => canonicalCollections(records)
-    .filter(item => {
-      const paymentPayload = item.payload as Record<string, unknown>
-      return String(paymentPayload.contractNumber ?? "").trim() === contractNumber ||
-        invoiceContractNumbers.get(String(paymentPayload.invoiceNumber ?? "").trim()) === contractNumber
-    })
-    .reduce((sum, item) => {
-      const paymentPayload = item.payload as Record<string, unknown>
-      if (Array.isArray(paymentPayload.allocations)) {
-        const allocation = paymentPayload.allocations.find(entry =>
-          String((entry as Record<string, unknown>).contractNumber ?? "").trim() === contractNumber,
-        )
-        return allocation ? sum + Number((allocation as Record<string, unknown>).amount ?? 0) : sum
+  const paymentAllocationForContract = (paymentPayload: Record<string, unknown>, contract: ContainerSystemRecord) => {
+    if (!Array.isArray(paymentPayload.allocations)) return undefined
+    const contractPayload = contract.payload as Record<string, unknown>
+    const contractNumber = String(contractPayload.contractNumber ?? "").trim() || String(contract.reference ?? "").trim()
+    const allocations = paymentPayload.allocations as Record<string, unknown>[]
+    const hasContractIds = allocations.some(allocation => Number(allocation.contractId ?? 0) > 0)
+    if (hasContractIds) return allocations.find(allocation => Number(allocation.contractId ?? 0) === contract.id)
+
+    const allocationsWithInvoices = allocations.filter(allocation => Number(allocation.invoiceId ?? 0) > 0)
+    if (allocationsWithInvoices.length) {
+      return allocationsWithInvoices.find(allocation => {
+        const invoice = records.find(item => item.kind === "invoice" && item.id === Number(allocation.invoiceId))
+        return Boolean(invoice && invoiceBelongsToContract(invoice, contract))
+      })
+    }
+
+    return contractNumber
+      ? allocations.find(allocation => String(allocation.contractNumber ?? "").trim() === contractNumber)
+      : undefined
+  }
+  const paymentMatchesContract = (payment: ContainerSystemRecord, contract: ContainerSystemRecord) => {
+    const paymentPayload = payment.payload as Record<string, unknown>
+    const contractPayload = contract.payload as Record<string, unknown>
+    const paymentCustomerId = Number(paymentPayload.customerRecordId ?? 0)
+    const contractCustomerId = Number(contractPayload.customerRecordId ?? 0)
+    if (paymentCustomerId > 0 && contractCustomerId > 0 && paymentCustomerId !== contractCustomerId) return false
+
+    if (Array.isArray(paymentPayload.allocations)) {
+      const allocations = paymentPayload.allocations as Record<string, unknown>[]
+      if (allocations.some(allocation => Number(allocation.contractId ?? 0) > 0)) {
+        return allocations.some(allocation => Number(allocation.contractId ?? 0) === contract.id)
       }
-      return sum + Number(paymentPayload.amount ?? 0)
-    }, 0)
+      if (allocations.some(allocation => Number(allocation.invoiceId ?? 0) > 0)) {
+        return Boolean(paymentAllocationForContract(paymentPayload, contract))
+      }
+      const contractNumber = String(contractPayload.contractNumber ?? "").trim() || String(contract.reference ?? "").trim()
+      return Boolean(contractNumber && allocations.some(
+        allocation => String(allocation.contractNumber ?? "").trim() === contractNumber,
+      ))
+    }
+
+    const directContractId = Number(paymentPayload.contractRecordId ?? paymentPayload.contractId ?? 0)
+    if (directContractId > 0) return directContractId === contract.id
+
+    const invoiceId = Number(paymentPayload.invoiceRecordId ?? paymentPayload.invoiceId ?? 0)
+    if (invoiceId > 0) {
+      const invoice = records.find(item => item.kind === "invoice" && item.id === invoiceId)
+      if (invoice) return invoiceBelongsToContract(invoice, contract)
+    }
+
+    const invoiceNumber = String(paymentPayload.invoiceNumber ?? "").trim()
+    if (invoiceNumber) {
+      const matchingInvoices = records.filter(item => item.kind === "invoice" &&
+        String((item.payload as Record<string, unknown>).invoiceNumber ?? item.reference ?? "").trim() === invoiceNumber)
+      if (matchingInvoices.length) return matchingInvoices.some(invoice => invoiceBelongsToContract(invoice, contract))
+    }
+
+    const paymentContractNumber = String(paymentPayload.contractNumber ?? "").trim()
+    const contractNumber = String(contractPayload.contractNumber ?? "").trim() || String(contract.reference ?? "").trim()
+    return Boolean(contractNumber && paymentContractNumber === contractNumber)
+  }
   const remainingForContract = (item: ContainerSystemRecord) => {
     const contractPayload = item.payload as Record<string, unknown>
     const total = Number(contractPayload.total ?? contractPayload.amount ?? 0)
     const storedRemaining = Number(contractPayload.remaining)
-    const contractNumber = String(contractPayload.contractNumber ?? item.reference ?? "")
     const computedRemaining = canonicalCollections(records)
       .reduce((sum, record) => {
         const paymentPayload = record.payload as Record<string, unknown>
-        const allocations = Array.isArray(paymentPayload.allocations) ? paymentPayload.allocations : []
-        const allocation = allocations.find(entry => {
-          const value = entry as Record<string, unknown>
-          return Number(value.contractId ?? 0) === item.id ||
-            String(value.contractNumber ?? "").trim() === contractNumber
-        }) as Record<string, unknown> | undefined
+        if (!paymentMatchesContract(record, item)) return sum
         if (Array.isArray(paymentPayload.allocations)) {
+          const allocation = paymentAllocationForContract(paymentPayload, item)
           return allocation ? sum + Number(allocation.amount ?? 0) : sum
         }
-        const matchesContract = Number(paymentPayload.contractRecordId ?? 0) === item.id ||
-          String(paymentPayload.contractNumber ?? "").trim() === contractNumber
-        return matchesContract ? sum + Number(paymentPayload.amount ?? 0) : sum
+        return sum + Number(paymentPayload.amount ?? 0)
       }, 0)
     const paidAmount = Number.isFinite(computedRemaining) ? computedRemaining : 0
     const remaining = Number.isFinite(total) && total > 0
@@ -1283,6 +1334,18 @@ export function RecordDialog({
     const customerPayload = customer.payload as Record<string, unknown>
     setPayload(current => ({
       ...current,
+      ...(isCustomerPayment ? {
+        contractNumber: "",
+        contractRecordId: "",
+        contractRecordIds: "",
+        contractNumbers: "",
+        invoiceNumber: "",
+        invoiceRecordId: "",
+        invoiceId: "",
+        allocationAmounts: "{}",
+        allocationInvoices: "{}",
+        amount: "",
+      } : {}),
       customerRecordId: String(customer.id),
       customerName: String(customerPayload.name ?? customerPayload.customerName ?? ""),
       customerPhone: String(customerPayload.phone ?? customerPayload.mobile ?? ""),
@@ -1318,7 +1381,7 @@ export function RecordDialog({
   }
   const paymentContractOptions = openContractsForPayment.map(item => {
     const contractPayload = item.payload as Record<string, unknown>
-    const number = String(contractPayload.contractNumber ?? item.reference ?? `#${item.id}`)
+    const number = contractDisplayNumber(item)
     return {
       value: String(item.id),
       number,
@@ -1358,7 +1421,7 @@ export function RecordDialog({
       return {}
     }
   })()
-  const paymentInvoice = isCustomerPayment
+  const paymentInvoiceCandidate = isCustomerPayment && selectedPaymentCustomer
     ? records.find(item => {
         if (item.kind !== "invoice" || item.status === "archived") return false
         const invoicePayload = item.payload as Record<string, unknown>
@@ -1367,16 +1430,22 @@ export function RecordDialog({
             Boolean(String(payload.invoiceNumber ?? "").trim()))
       })
     : undefined
+  const paymentInvoice = paymentInvoiceCandidate && selectedPaymentCustomer && (() => {
+    const invoicePayload = paymentInvoiceCandidate.payload as Record<string, unknown>
+    const invoiceCustomerId = Number(invoicePayload.customerRecordId ?? 0)
+    if (invoiceCustomerId > 0 && invoiceCustomerId !== selectedPaymentCustomer.id) return false
+    const linkedContractId = Number(invoicePayload.contractRecordId ?? invoicePayload.contractId ?? invoicePayload.linkedContractId ?? 0)
+    if (linkedContractId > 0) {
+      return selectedPaymentContracts.some(contract =>
+        contract.id === linkedContractId && invoiceBelongsToContract(paymentInvoiceCandidate, contract),
+      )
+    }
+    return invoiceCustomerId === selectedPaymentCustomer.id ||
+      selectedPaymentContracts.some(contract => invoiceBelongsToContract(paymentInvoiceCandidate, contract))
+  })() ? paymentInvoiceCandidate : undefined
   const paymentInvoicePayload = paymentInvoice?.payload as Record<string, unknown> | undefined
   const paymentInvoiceContract = paymentInvoice
-    ? records.find(item => {
-        if (item.kind !== "contract" || item.status === "archived") return false
-        const contractPayload = item.payload as Record<string, unknown>
-        return (paymentInvoicePayload?.contractRecordId && Number(contractPayload.customerRecordId ?? 0) === Number(paymentInvoicePayload.customerRecordId ?? 0) &&
-          Number(item.id) === Number(paymentInvoicePayload.contractRecordId)) ||
-          (String(contractPayload.contractNumber ?? item.reference ?? "").trim() === String(paymentInvoicePayload?.contractNumber ?? "").trim() &&
-            Boolean(String(paymentInvoicePayload?.contractNumber ?? "").trim()))
-      })
+    ? selectedPaymentContracts.find(item => invoiceBelongsToContract(paymentInvoice, item))
     : undefined
   const paymentSubmitPayload = isCustomerPayment
     ? (() => {
@@ -1396,7 +1465,8 @@ export function RecordDialog({
           ...invoicePayload,
           ...(paymentInvoiceContract ? {
             contractRecordId: String(paymentInvoiceContract.id),
-            contractNumber: String((paymentInvoiceContract.payload as Record<string, unknown>).contractNumber ?? paymentInvoiceContract.reference ?? ""),
+            contractNumber: String((paymentInvoiceContract.payload as Record<string, unknown>).contractNumber ?? "").trim() ||
+              String(paymentInvoiceContract.reference ?? "").trim(),
           } : {}),
           ...(paymentInvoice ? { invoiceRecordId: String(paymentInvoice.id) } : {}),
           allocations,
@@ -1721,15 +1791,7 @@ export function RecordDialog({
                     value={customerIdForPayment}
                     onChange={event => {
                       const customer = customers.find(item => String(item.id) === event.target.value)
-                      setPayload(current => ({
-                        ...current,
-                        customerRecordId: event.target.value,
-                        customerName: String(customer?.payload.name ?? ""),
-                        contractNumber: "",
-                        contractRecordId: "",
-                        contractRecordIds: "",
-                        contractNumbers: "",
-                      }))
+                      if (customer) selectCustomer(customer)
                     }}
                     required
                     className="flex h-11 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
@@ -1754,11 +1816,9 @@ export function RecordDialog({
                         const contractPayload = contract?.payload as Record<string, unknown> | undefined
                         const total = Number(contractPayload?.total ?? contractPayload?.amount ?? 0)
                         const remaining = contract ? remainingForContract(contract) : total
-                        const contractNumber = String(contractPayload?.contractNumber ?? contract?.reference ?? "")
+                        const contractNumber = contract ? contractDisplayNumber(contract) : ""
                         const linkedInvoices = records.filter(item => {
-                          if (item.kind !== "invoice" || item.status === "archived") return false
-                          const invoicePayload = item.payload as Record<string, unknown>
-                          return String(invoicePayload.contractNumber ?? "").trim() === contractNumber
+                          return Boolean(contract && item.status !== "archived" && invoiceBelongsToContract(item, contract))
                         })
                         const checked = selectedPaymentContractIds.includes(option.value)
                           return (

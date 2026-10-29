@@ -62,6 +62,108 @@ function parsePayload(payload: unknown): Record<string, unknown> {
   }
 }
 
+function contractRecordNumber(contract: typeof containerSystemRecordsTable.$inferSelect) {
+  const payload = parsePayload(contract.payload);
+  return String(payload.contractNumber ?? "").trim() ||
+    String(payload.contractNo ?? "").trim() ||
+    String(contract.reference ?? "").trim();
+}
+
+function invoiceBelongsToContract(
+  invoice: typeof containerSystemRecordsTable.$inferSelect,
+  contract: typeof containerSystemRecordsTable.$inferSelect,
+) {
+  if (invoice.kind !== "invoice" || contract.kind !== "contract") return false;
+  const invoicePayload = parsePayload(invoice.payload);
+  const contractPayload = parsePayload(contract.payload);
+  const invoiceCustomerId = Number(invoicePayload.customerRecordId ?? 0);
+  const contractCustomerId = Number(contractPayload.customerRecordId ?? 0);
+  if (invoiceCustomerId > 0 && contractCustomerId > 0 && invoiceCustomerId !== contractCustomerId) return false;
+
+  const linkedContractId = Number(invoicePayload.contractRecordId ?? invoicePayload.contractId ?? invoicePayload.linkedContractId ?? 0);
+  if (linkedContractId > 0) return linkedContractId === contract.id;
+
+  const invoiceNumber = String(invoicePayload.contractNumber ?? invoicePayload.contractNo ?? "").trim();
+  const contractNumber = contractRecordNumber(contract);
+  return Boolean(invoiceNumber && contractNumber && invoiceNumber === contractNumber);
+}
+
+function financialAllocationForContract(
+  payload: Record<string, unknown>,
+  contract: typeof containerSystemRecordsTable.$inferSelect,
+  all: typeof containerSystemRecordsTable.$inferSelect[],
+) {
+  if (!Array.isArray(payload.allocations)) return undefined;
+  const allocations = payload.allocations as Record<string, unknown>[];
+  const withContractIds = allocations.filter(item => Number(item.contractId ?? 0) > 0);
+  if (withContractIds.length) return withContractIds.find(item => Number(item.contractId ?? 0) === contract.id);
+
+  const withInvoiceIds = allocations.filter(item => Number(item.invoiceId ?? 0) > 0);
+  if (withInvoiceIds.length) {
+    return withInvoiceIds.find(item => {
+      const invoice = all.find(row => row.kind === "invoice" && row.id === Number(item.invoiceId));
+      return Boolean(invoice && invoiceBelongsToContract(invoice, contract));
+    });
+  }
+
+  const contractNumber = contractRecordNumber(contract);
+  return contractNumber
+    ? allocations.find(item => String(item.contractNumber ?? "").trim() === contractNumber)
+    : undefined;
+}
+
+function financialRecordReferencesContract(
+  record: typeof containerSystemRecordsTable.$inferSelect,
+  contract: typeof containerSystemRecordsTable.$inferSelect,
+  all: typeof containerSystemRecordsTable.$inferSelect[],
+) {
+  const payload = parsePayload(record.payload);
+  const contractPayload = parsePayload(contract.payload);
+  const rowCustomerId = Number(payload.customerRecordId ?? 0);
+  const contractCustomerId = Number(contractPayload.customerRecordId ?? 0);
+  if (rowCustomerId > 0 && contractCustomerId > 0 && rowCustomerId !== contractCustomerId) return false;
+
+  if (Array.isArray(payload.allocations) && payload.allocations.length) {
+    const allocations = payload.allocations as Record<string, unknown>[];
+    const withContractIds = allocations.filter(item => Number(item.contractId ?? 0) > 0);
+    if (withContractIds.length) return withContractIds.some(item => Number(item.contractId ?? 0) === contract.id);
+    const withInvoiceIds = allocations.filter(item => Number(item.invoiceId ?? 0) > 0);
+    if (withInvoiceIds.length) return withInvoiceIds.some(item => {
+      const invoice = all.find(row => row.kind === "invoice" && row.id === Number(item.invoiceId));
+      return Boolean(invoice && invoiceBelongsToContract(invoice, contract));
+    });
+    const contractNumber = contractRecordNumber(contract);
+    const allocationNumbers = allocations.map(item => String(item.contractNumber ?? "").trim()).filter(Boolean);
+    if (allocationNumbers.length) return Boolean(contractNumber && allocationNumbers.includes(contractNumber));
+  }
+
+  const directContractId = Number(payload.contractRecordId ?? payload.contractId ?? payload.linkedContractId ?? 0);
+  if (directContractId > 0) return directContractId === contract.id;
+
+  const invoiceId = Number(payload.invoiceRecordId ?? payload.originalInvoiceId ?? payload.invoiceId ?? 0);
+  if (invoiceId > 0) {
+    const invoice = all.find(row => row.kind === "invoice" && row.id === invoiceId);
+    return Boolean(invoice && invoiceBelongsToContract(invoice, contract));
+  }
+
+  const originalPaymentId = Number(payload.originalPaymentId ?? payload.sourcePaymentId ?? 0);
+  if (originalPaymentId > 0) {
+    const original = all.find(row => ["payment", "receipt"].includes(row.kind) && row.id === originalPaymentId);
+    if (original) return financialRecordReferencesContract(original, contract, all);
+  }
+
+  const invoiceNumber = String(payload.invoiceNumber ?? "").trim();
+  if (invoiceNumber) {
+    const matchingInvoices = all.filter(row => row.kind === "invoice" &&
+      String(parsePayload(row.payload).invoiceNumber ?? row.reference ?? "").trim() === invoiceNumber);
+    if (matchingInvoices.length) return matchingInvoices.some(invoice => invoiceBelongsToContract(invoice, contract));
+  }
+
+  const recordNumber = String(payload.contractNumber ?? "").trim();
+  const contractNumber = contractRecordNumber(contract);
+  return Boolean(contractNumber && recordNumber === contractNumber);
+}
+
 const contractTermsFields = [
   "amount", "total", "subtotal", "taxAmount", "taxRate", "taxEnabled", "currency",
   "contractNumber", "customerRecordId", "customerName", "siteRecordId", "location", "address",
@@ -71,12 +173,16 @@ const contractTermsFields = [
 
 function recordReferencesContract(payload: Record<string, unknown>, contractId: number, contractNumber: string) {
   const directId = Number(payload.contractRecordId ?? payload.contractId ?? 0);
-  if (directId === contractId) return true;
-  if (contractNumber && String(payload.contractNumber ?? "").trim() === contractNumber) return true;
-  return Array.isArray(payload.allocations) && payload.allocations.some((allocation) =>
-    allocation && typeof allocation === "object" &&
-    Number((allocation as Record<string, unknown>).contractId ?? 0) === contractId,
-  );
+  if (directId > 0) return directId === contractId;
+  if (Array.isArray(payload.allocations) && payload.allocations.length) {
+    const allocations = payload.allocations as Record<string, unknown>[];
+    const withIds = allocations.filter(allocation => Number(allocation.contractId ?? 0) > 0);
+    if (withIds.length) return withIds.some(allocation => Number(allocation.contractId ?? 0) === contractId);
+    const numbers = allocations.map(allocation => String(allocation.contractNumber ?? "").trim()).filter(Boolean);
+    if (numbers.length) return Boolean(contractNumber && numbers.includes(contractNumber));
+  }
+  const number = String(payload.contractNumber ?? "").trim();
+  return Boolean(contractNumber && number && number === contractNumber);
 }
 
 function contractPatchRequiresAmendment(
@@ -91,7 +197,7 @@ function contractPatchRequiresAmendment(
   if (!termsChanged) return false;
 
   const contractPayload = before;
-  const contractNumber = String(contractPayload.contractNumber ?? contract.reference ?? "").trim();
+  const contractNumber = contractRecordNumber(contract);
   const references = (record: typeof containerSystemRecordsTable.$inferSelect) =>
     recordReferencesContract(parsePayload(record.payload), contract.id, contractNumber);
   const lifecycleAdvanced = ["delivered", "returned", "closed"].includes(contract.status) ||
@@ -2031,52 +2137,27 @@ router.get("/admin/container-system/financial/contract-ledgers", requireContaine
   const deposits = active.filter(row => (row.kind === "deposit" || row.kind === "bank_deposit") && isPosted(row));
   const invoices = active.filter(row => row.kind === "invoice" && isPosted(row));
   const returns = active.filter(row => row.kind === "payment_return" && isPosted(row));
-  const invoiceContracts = new Map<string, string>();
-  invoices.forEach(row => {
-    const payload = parsePayload(row.payload);
-    const invoiceNumber = String(payload.invoiceNumber ?? row.reference).trim();
-    const contractNumber = String(payload.contractNumber ?? "").trim();
-    if (invoiceNumber && contractNumber) invoiceContracts.set(invoiceNumber, contractNumber);
-  });
-  const matchContract = (payload: Record<string, unknown>) => {
-    const direct = String(payload.contractNumber ?? "").trim();
-    return direct || invoiceContracts.get(String(payload.invoiceNumber ?? "").trim()) || "";
-  };
   const ledgers = contracts
     .map(contract => {
       const payload = parsePayload(contract.payload);
-      const contractNumber = String(payload.contractNumber ?? contract.reference).trim();
+      const contractNumber = contractRecordNumber(contract);
       const customerName = String(payload.customerName ?? "").trim();
-       const paymentsForContract = payments.filter(row => {
-         const payment = parsePayload(row.payload);
-         return matchContract(payment) === contractNumber ||
-           (Array.isArray(payment.allocations) && payment.allocations.some((allocation: unknown) =>
-             Number((allocation as Record<string, unknown>).contractId) === contract.id));
-       });
-       const returnsForContract = returns.filter(row => {
-         const item = parsePayload(row.payload);
-         const directContractId = Number(item.contractRecordId ?? item.contractId ?? 0);
-         if (directContractId === contract.id || String(item.contractNumber ?? "").trim() === contractNumber) return true;
-         const invoiceId = Number(item.originalInvoiceId ?? item.invoiceRecordId ?? 0);
-         return invoiceId > 0 && invoices.some(invoice => {
-           if (invoice.id !== invoiceId) return false;
-           const invoicePayload = parsePayload(invoice.payload);
-           return Number(invoicePayload.contractRecordId ?? 0) === contract.id ||
-             String(invoicePayload.contractNumber ?? "").trim() === contractNumber;
-         });
-       });
-      const depositsForContract = deposits.filter(row => {
-        const item = parsePayload(row.payload);
-        return String(item.contractNumber ?? "").trim() === contractNumber ||
-          paymentsForContract.some(payment =>
-            String(item.sourcePaymentId ?? item.linkedPaymentId ?? "") === String(payment.id));
-      });
+      const paymentsForContract = payments.filter(row =>
+        financialRecordReferencesContract(row, contract, active),
+      );
+      const returnsForContract = returns.filter(row =>
+        financialRecordReferencesContract(row, contract, active),
+      );
+      const depositsForContract = deposits.filter(row =>
+        financialRecordReferencesContract(row, contract, active) ||
+        paymentsForContract.some(payment =>
+          String(parsePayload(row.payload).sourcePaymentId ?? parsePayload(row.payload).linkedPaymentId ?? "") === String(payment.id),
+        ),
+      );
       const total = Number(payload.total ?? payload.amount ?? 0);
-       const collected = paymentsForContract.reduce((sum, row) => {
-         const payment = parsePayload(row.payload);
-         const allocation = Array.isArray(payment.allocations)
-           ? payment.allocations.find((item: unknown) => Number((item as Record<string, unknown>).contractId) === contract.id)
-           : null;
+        const collected = paymentsForContract.reduce((sum, row) => {
+          const payment = parsePayload(row.payload);
+          const allocation = financialAllocationForContract(payment, contract, active);
          return sum + Number(
            Array.isArray(payment.allocations)
              ? (allocation as Record<string, unknown> | undefined)?.amount ?? 0
@@ -2128,10 +2209,46 @@ router.post("/admin/container-system/financial/settle", requireContainerPermissi
   if (operationKey.length < 8 || operationKey.length > 160) return res.status(422).json({ error: "مفتاح العملية غير صالح" });
   const allRecords = await db.select().from(containerSystemRecordsTable);
   const requestedInvoiceId = Number(body.invoiceId ?? body.invoiceRecordId ?? 0) || null;
+  const requestedCustomerId = Number(body.customerRecordId ?? 0) || null;
+  const requestedCustomer = requestedCustomerId
+    ? allRecords.find(row => row.id === requestedCustomerId && row.kind === "customer" && row.status !== "archived")
+    : undefined;
+  if (requestedCustomerId && !requestedCustomer) {
+    return res.status(422).json({ error: "العميل المحدد غير موجود أو مؤرشف" });
+  }
+  const requestedInvoiceNumber = String(body.invoiceNumber ?? "").trim();
+  const invoiceNumberCandidates = requestedInvoiceNumber
+    ? allRecords.filter(row => row.kind === "invoice" && row.status !== "archived" &&
+        String(parsePayload(row.payload).invoiceNumber ?? row.reference ?? "").trim() === requestedInvoiceNumber)
+      .filter(invoice => {
+        if (!requestedCustomerId) return true
+        const invoicePayload = parsePayload(invoice.payload)
+        const invoiceCustomerId = Number(invoicePayload.customerRecordId ?? 0)
+        if (invoiceCustomerId > 0 && invoiceCustomerId !== requestedCustomerId) return false
+        const linkedContractId = Number(invoicePayload.contractRecordId ?? invoicePayload.contractId ?? invoicePayload.linkedContractId ?? 0)
+        if (linkedContractId > 0) {
+          const linkedContract = allRecords.find(row => row.id === linkedContractId && row.kind === "contract")
+          if (!linkedContract) return false
+          const linkedCustomerId = Number(parsePayload(linkedContract.payload).customerRecordId ?? 0)
+          if (linkedCustomerId > 0 && linkedCustomerId !== requestedCustomerId) return false
+          return invoiceBelongsToContract(invoice, linkedContract)
+        }
+        return true
+      })
+    : [];
   const requestedInvoice = requestedInvoiceId
     ? allRecords.find(row => row.id === requestedInvoiceId && row.kind === "invoice" && row.status !== "archived")
-    : allRecords.find(row => row.kind === "invoice" && String(parsePayload(row.payload).invoiceNumber ?? row.reference).trim() === String(body.invoiceNumber ?? "").trim() && String(body.invoiceNumber ?? "").trim());
+    : invoiceNumberCandidates.length === 1 ? invoiceNumberCandidates[0] : undefined;
+  if (!requestedInvoiceId && requestedInvoiceNumber && invoiceNumberCandidates.length > 1) {
+    return res.status(422).json({ error: "رقم الفاتورة غير فريد؛ اختر الفاتورة من القائمة" });
+  }
   const requestedInvoicePayload = requestedInvoice ? parsePayload(requestedInvoice.payload) : null;
+  if (requestedCustomerId && requestedInvoicePayload) {
+    const invoiceCustomerId = Number(requestedInvoicePayload.customerRecordId ?? 0);
+    if (invoiceCustomerId > 0 && invoiceCustomerId !== requestedCustomerId) {
+      return res.status(422).json({ error: "الفاتورة لا تتبع العميل المحدد" });
+    }
+  }
   const requestedContractId = Number(body.contractId ?? requestedInvoicePayload?.contractRecordId ?? 0) || null;
   const requestedAllocations = Array.isArray(body.allocations) && body.allocations.length > 0
     ? body.allocations
@@ -2212,33 +2329,32 @@ router.post("/admin/container-system/financial/settle", requireContainerPermissi
         const contract = all.find(row => row.id === item.contractId && row.kind === "contract" && row.status !== "archived");
         if (!contract) throw new Error("أحد العقود غير موجود أو مؤرشف");
         const contractPayload = parsePayload(contract.payload);
-        const contractNumber = String(contractPayload.contractNumber ?? contract.reference).trim();
-        const contractInvoices = all.filter(row => {
-          if (row.kind !== "invoice" || row.status === "archived") return false;
-          const invoicePayload = parsePayload(row.payload);
-          return Number(invoicePayload.contractRecordId ?? 0) === contract.id ||
-            String(invoicePayload.contractNumber ?? "").trim() === contractNumber;
-        });
+        const contractNumber = contractRecordNumber(contract);
+        if (requestedCustomerId) {
+          const contractCustomerId = Number(contractPayload.customerRecordId ?? 0);
+          const expectedCustomerName = String(parsePayload(requestedCustomer!.payload).name ?? parsePayload(requestedCustomer!.payload).customerName ?? "").trim();
+          const contractCustomerName = String(contractPayload.customerName ?? "").trim();
+          if (contractCustomerId > 0
+            ? contractCustomerId !== requestedCustomerId
+            : !expectedCustomerName || contractCustomerName !== expectedCustomerName) {
+            throw new Error("العقد لا يتبع العميل المحدد");
+          }
+        }
+        const contractInvoices = all.filter(row =>
+          row.kind === "invoice" && row.status !== "archived" && invoiceBelongsToContract(row, contract),
+        );
         if (contractInvoices.length > 0 && item.invoiceId == null) {
           throw new Error(`حدد فاتورة مرحّلة للتحصيل في العقد ${contractNumber}`);
         }
-          const grossPaid = collectionRows.filter(row => matchContractForSettlement(row, all) === contractNumber)
+          const grossPaid = collectionRows.filter(row => financialRecordReferencesContract(row, contract, all))
           .reduce((sum, row) => {
             const payment = parsePayload(row.payload);
-            const allocated = Array.isArray(payment.allocations)
-              ? payment.allocations.find((entry: unknown) => Number((entry as Record<string, unknown>).contractId) === contract.id)
-              : null;
-            return sum + Number(allocated ? (allocated as Record<string, unknown>).amount : payment.contractId === contract.id ? payment.amount : 0);
+            const allocated = financialAllocationForContract(payment, contract, all);
+            return sum + Number(allocated ? allocated.amount : payment.amount ?? 0);
           }, 0);
-          const returned = returnRows.filter(row => {
-            const refund = parsePayload(row.payload);
-            if (Number(refund.contractRecordId ?? refund.contractId ?? 0) === contract.id ||
-                String(refund.contractNumber ?? "").trim() === contractNumber) return true;
-            const originalPaymentId = Number(refund.originalPaymentId ?? refund.sourcePaymentId ?? 0);
-            return originalPaymentId > 0 && collectionRows.some(payment =>
-              payment.id === originalPaymentId && matchContractForSettlement(payment, all) === contractNumber,
-            );
-          }).reduce((sum, row) => {
+          const returned = returnRows.filter(row =>
+            financialRecordReferencesContract(row, contract, all),
+          ).reduce((sum, row) => {
             const refund = parsePayload(row.payload);
             return sum + Number(refund.amount ?? refund.total ?? 0);
           }, 0);
@@ -2249,9 +2365,12 @@ router.post("/admin/container-system/financial/settle", requireContainerPermissi
           const invoice = all.find(row => row.id === item.invoiceId && row.kind === "invoice" && row.status !== "archived");
           if (!invoice) throw new Error("الفاتورة المرتبطة غير موجودة أو مؤرشفة");
           const invoicePayload = parsePayload(invoice.payload);
-          if (Number(invoicePayload.contractRecordId ?? 0) !== contract.id &&
-              String(invoicePayload.contractNumber ?? "").trim() !== contractNumber) {
+          if (!invoiceBelongsToContract(invoice, contract)) {
             throw new Error("الفاتورة لا تتبع العقد المحدد");
+          }
+          const invoiceCustomerId = Number(invoicePayload.customerRecordId ?? 0);
+          if (requestedCustomerId && invoiceCustomerId > 0 && invoiceCustomerId !== requestedCustomerId) {
+            throw new Error("الفاتورة لا تتبع العميل المحدد");
           }
           const invoiceTotal = Number(invoicePayload.total ?? invoicePayload.amount ?? 0);
           const canIssueContractInvoice = invoiceTotal > 0 &&
@@ -2445,24 +2564,6 @@ router.post("/admin/container-system/financial/settle", requireContainerPermissi
   }
 });
 
-function matchContractForSettlement(row: typeof containerSystemRecordsTable.$inferSelect, all: typeof containerSystemRecordsTable.$inferSelect[]) {
-  const payload = parsePayload(row.payload);
-  const direct = String(payload.contractNumber ?? "").trim();
-  if (direct) return direct;
-  const contractId = Number(payload.contractRecordId ?? payload.contractId ?? 0);
-  if (Number.isInteger(contractId) && contractId > 0) {
-    const contract = all.find(item => item.kind === "contract" && item.id === contractId);
-    if (contract) {
-      const contractPayload = parsePayload(contract.payload);
-      return String(contractPayload.contractNumber ?? contract.reference ?? "").trim();
-    }
-  }
-  const invoiceNumber = String(payload.invoiceNumber ?? "").trim();
-  if (!invoiceNumber) return "";
-  const invoice = all.find(item => item.kind === "invoice" && String(parsePayload(item.payload).invoiceNumber ?? item.reference).trim() === invoiceNumber);
-  return String(invoice ? parsePayload(invoice.payload).contractNumber ?? "" : "").trim();
-}
-
 router.post("/admin/container-system/contracts/:id/lifecycle", requireContainerPermission("contract"), async (req, res) => {
   const adminReq = req as unknown as AdminRequest;
   const contractId = Number(String(req.params.id));
@@ -2538,40 +2639,25 @@ router.post("/admin/container-system/contracts/:id/lifecycle", requireContainerP
         if (contract.status !== "returned") {
           throw new Error("لا يمكن إغلاق العقد قبل استرجاع الحاوية وتسجيل التفريغ أو الإكمال التشغيلي");
         }
-        const contractNumber = String(contractPayload.contractNumber ?? contract.reference).trim();
+        const contractNumber = contractRecordNumber(contract);
         const collected = postedCollections(allRows)
-          .filter(row => {
-            const payload = parsePayload(row.payload);
-            return String(payload.contractNumber ?? "").trim() === contractNumber ||
-              Number(payload.contractRecordId ?? payload.contractId ?? 0) === contractId ||
-              (Array.isArray(payload.allocations) && payload.allocations.some((item: unknown) =>
-                Number((item as Record<string, unknown>).contractId) === contractId));
-          })
+          .filter(row => financialRecordReferencesContract(row, contract, allRows))
           .reduce((sum, row) => {
             const payload = parsePayload(row.payload);
-            const allocation = Array.isArray(payload.allocations)
-              ? payload.allocations.find((item: unknown) => Number((item as Record<string, unknown>).contractId) === contractId) as Record<string, unknown> | undefined
-              : undefined;
-            return sum + Number(allocation?.amount ?? payload.amount ?? 0);
+            const allocation = financialAllocationForContract(payload, contract, allRows);
+            return sum + Number(Array.isArray(payload.allocations) ? allocation?.amount ?? 0 : payload.amount ?? 0);
           }, 0);
         const returned = allRows
           .filter(row => row.kind === "payment_return" && row.status === "posted")
-          .filter(row => {
-            const payload = parsePayload(row.payload);
-            return Number(payload.contractRecordId ?? payload.contractId ?? 0) === contractId ||
-              String(payload.contractNumber ?? "").trim() === contractNumber;
-          })
+          .filter(row => financialRecordReferencesContract(row, contract, allRows))
           .reduce((sum, row) => sum + Number(parsePayload(row.payload).amount ?? 0), 0);
         const total = Number(contractPayload.total ?? contractPayload.amount ?? 0);
         if (Math.max(total - collected + returned, 0) > 0.01) {
           throw new Error(`لا يمكن إغلاق العقد قبل اكتمال التسوية المالية؛ المتبقي ${Math.max(total - collected + returned, 0).toFixed(2)} ر.س`);
         }
-        const linkedInvoices = allRows.filter(row => {
-          if (row.kind !== "invoice" || row.status === "archived") return false;
-          const invoicePayload = parsePayload(row.payload);
-          return Number(invoicePayload.contractRecordId ?? 0) === contractId ||
-            String(invoicePayload.contractNumber ?? "").trim() === contractNumber;
-        });
+        const linkedInvoices = allRows.filter(row =>
+          row.status !== "archived" && invoiceBelongsToContract(row, contract),
+        );
         for (const invoice of linkedInvoices) {
           const invoicePayload = parsePayload(invoice.payload);
           const invoiceTotal = Number(invoicePayload.total ?? invoicePayload.amount ?? 0);

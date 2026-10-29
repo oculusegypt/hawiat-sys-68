@@ -19,8 +19,137 @@ function hsJson($value, int $status = 200): void {
 
 function hsPayload($value): array {
     if (!$value) return [];
+    if (is_array($value)) return $value;
     $decoded = json_decode($value, true);
     return is_array($decoded) ? $decoded : [];
+}
+
+function hsContractRecordNumber(array $contract): string {
+    $payload = hsPayload($contract['payload'] ?? null);
+    return trim((string)($payload['contractNumber'] ?? ''))
+        ?: trim((string)($payload['contractNo'] ?? ''))
+        ?: trim((string)($contract['reference'] ?? ''));
+}
+
+function hsInvoiceBelongsToContract(array $invoice, array $contract): bool {
+    if (($invoice['kind'] ?? '') !== 'invoice' || ($contract['kind'] ?? '') !== 'contract') return false;
+    $invoicePayload = hsPayload($invoice['payload'] ?? null);
+    $contractPayload = hsPayload($contract['payload'] ?? null);
+    $invoiceCustomerId = (int)($invoicePayload['customerRecordId'] ?? 0);
+    $contractCustomerId = (int)($contractPayload['customerRecordId'] ?? 0);
+    if ($invoiceCustomerId > 0 && $contractCustomerId > 0 && $invoiceCustomerId !== $contractCustomerId) return false;
+
+    $linkedContractId = (int)($invoicePayload['contractRecordId'] ?? $invoicePayload['contractId'] ?? $invoicePayload['linkedContractId'] ?? 0);
+    if ($linkedContractId > 0) return $linkedContractId === (int)$contract['id'];
+
+    $invoiceNumber = trim((string)($invoicePayload['contractNumber'] ?? $invoicePayload['contractNo'] ?? ''));
+    $contractNumber = hsContractRecordNumber($contract);
+    return $invoiceNumber !== '' && $contractNumber !== '' && $invoiceNumber === $contractNumber;
+}
+
+function hsFinancialAllocationForContract(array $row, array $contract, array $records): ?array {
+    $payload = hsPayload($row['payload'] ?? null);
+    if (!is_array($payload['allocations'] ?? null)) return null;
+    $allocations = $payload['allocations'];
+    $withContractIds = array_values(array_filter($allocations, static fn($item): bool =>
+        is_array($item) && (int)($item['contractId'] ?? 0) > 0));
+    if ($withContractIds !== []) {
+        foreach ($withContractIds as $allocation) {
+            if ((int)($allocation['contractId'] ?? 0) === (int)$contract['id']) return $allocation;
+        }
+        return null;
+    }
+
+    $withInvoiceIds = array_values(array_filter($allocations, static fn($item): bool =>
+        is_array($item) && (int)($item['invoiceId'] ?? 0) > 0));
+    if ($withInvoiceIds !== []) {
+        foreach ($withInvoiceIds as $allocation) {
+            foreach ($records as $invoice) {
+                if (($invoice['kind'] ?? '') === 'invoice'
+                    && (int)($invoice['id'] ?? 0) === (int)$allocation['invoiceId']
+                    && hsInvoiceBelongsToContract($invoice, $contract)) return $allocation;
+            }
+        }
+        return null;
+    }
+
+    $contractNumber = hsContractRecordNumber($contract);
+    if ($contractNumber === '') return null;
+    foreach ($allocations as $allocation) {
+        if (is_array($allocation) && trim((string)($allocation['contractNumber'] ?? '')) === $contractNumber) return $allocation;
+    }
+    return null;
+}
+
+function hsRecordReferencesContract(array $row, array $contract, array $records): bool {
+    $payload = hsPayload($row['payload'] ?? null);
+    $contractPayload = hsPayload($contract['payload'] ?? null);
+    $rowCustomerId = (int)($payload['customerRecordId'] ?? 0);
+    $contractCustomerId = (int)($contractPayload['customerRecordId'] ?? 0);
+    if ($rowCustomerId > 0 && $contractCustomerId > 0 && $rowCustomerId !== $contractCustomerId) return false;
+
+    if (is_array($payload['allocations'] ?? null) && $payload['allocations'] !== []) {
+        $allocations = $payload['allocations'];
+        $withContractIds = array_values(array_filter($allocations, static fn($item): bool =>
+            is_array($item) && (int)($item['contractId'] ?? 0) > 0));
+        if ($withContractIds !== []) {
+            foreach ($withContractIds as $allocation) {
+                if ((int)$allocation['contractId'] === (int)$contract['id']) return true;
+            }
+            return false;
+        }
+
+        $withInvoiceIds = array_values(array_filter($allocations, static fn($item): bool =>
+            is_array($item) && (int)($item['invoiceId'] ?? 0) > 0));
+        if ($withInvoiceIds !== []) return hsFinancialAllocationForContract($row, $contract, $records) !== null;
+
+        $allocationNumbers = array_values(array_filter(array_map(static fn($item): string =>
+            is_array($item) ? trim((string)($item['contractNumber'] ?? '')) : '', $allocations)));
+        if ($allocationNumbers !== []) {
+            $contractNumber = hsContractRecordNumber($contract);
+            return $contractNumber !== '' && in_array($contractNumber, $allocationNumbers, true);
+        }
+    }
+
+    $directContractId = (int)($payload['contractRecordId'] ?? $payload['contractId'] ?? $payload['linkedContractId'] ?? 0);
+    if ($directContractId > 0) return $directContractId === (int)$contract['id'];
+
+    $invoiceId = (int)($payload['invoiceRecordId'] ?? $payload['originalInvoiceId'] ?? $payload['invoiceId'] ?? 0);
+    if ($invoiceId > 0) {
+        foreach ($records as $invoice) {
+            if (($invoice['kind'] ?? '') === 'invoice' && (int)($invoice['id'] ?? 0) === $invoiceId) {
+                return hsInvoiceBelongsToContract($invoice, $contract);
+            }
+        }
+        return false;
+    }
+
+    $originalPaymentId = (int)($payload['originalPaymentId'] ?? $payload['sourcePaymentId'] ?? 0);
+    if ($originalPaymentId > 0) {
+        foreach ($records as $original) {
+            if (in_array((string)($original['kind'] ?? ''), ['payment', 'receipt'], true)
+                && (int)($original['id'] ?? 0) === $originalPaymentId) {
+                return hsRecordReferencesContract($original, $contract, $records);
+            }
+        }
+    }
+
+    $invoiceNumber = trim((string)($payload['invoiceNumber'] ?? ''));
+    if ($invoiceNumber !== '') {
+        $matchingInvoices = array_values(array_filter($records, static fn(array $invoice): bool =>
+            ($invoice['kind'] ?? '') === 'invoice'
+            && trim((string)(hsPayload($invoice['payload'] ?? null)['invoiceNumber'] ?? $invoice['reference'] ?? '')) === $invoiceNumber));
+        if ($matchingInvoices !== []) {
+            foreach ($matchingInvoices as $invoice) {
+                if (hsInvoiceBelongsToContract($invoice, $contract)) return true;
+            }
+            return false;
+        }
+    }
+
+    $recordNumber = trim((string)($payload['contractNumber'] ?? ''));
+    $contractNumber = hsContractRecordNumber($contract);
+    return $contractNumber !== '' && $recordNumber !== '' && $recordNumber === $contractNumber;
 }
 
 function hsContractPatchRequiresAmendment(PDO $pdo, array $contract, array $nextPayload): bool {
@@ -41,14 +170,21 @@ function hsContractPatchRequiresAmendment(PDO $pdo, array $contract, array $next
     if (!$termsChanged) return false;
 
     $contractId = (int)$contract['id'];
-    $contractNumber = trim((string)($before['contractNumber'] ?? $contract['reference'] ?? ''));
+    $contractNumber = hsContractRecordNumber($contract);
     $referencesContract = static function(array $payload) use ($contractId, $contractNumber): bool {
-        if ((int)($payload['contractRecordId'] ?? $payload['contractId'] ?? 0) === $contractId) return true;
-        if ($contractNumber !== '' && trim((string)($payload['contractNumber'] ?? '')) === $contractNumber) return true;
-        foreach (($payload['allocations'] ?? []) as $allocation) {
-            if (is_array($allocation) && (int)($allocation['contractId'] ?? 0) === $contractId) return true;
+        $directId = (int)($payload['contractRecordId'] ?? $payload['contractId'] ?? 0);
+        if ($directId > 0) return $directId === $contractId;
+        $allocations = is_array($payload['allocations'] ?? null) ? $payload['allocations'] : [];
+        $allocationIds = array_values(array_filter($allocations, static fn($allocation): bool =>
+            is_array($allocation) && (int)($allocation['contractId'] ?? 0) > 0));
+        if ($allocationIds !== []) {
+            foreach ($allocationIds as $allocation) {
+                if ((int)$allocation['contractId'] === $contractId) return true;
+            }
+            return false;
         }
-        return false;
+        $number = trim((string)($payload['contractNumber'] ?? ''));
+        return $contractNumber !== '' && $number !== '' && $number === $contractNumber;
     };
     $lifecycleAdvanced = in_array((string)$contract['status'], ['delivered', 'returned', 'closed'], true);
     $financialPosted = false;
@@ -1347,32 +1483,21 @@ function hsUpdateContainerContractLifecycle(PDO $pdo, int $contractId, string $a
             if ($contract['status'] !== 'returned') {
                 throw new RuntimeException('لا يمكن إغلاق العقد قبل استرجاع الحاوية وتسجيل التفريغ أو الإكمال التشغيلي', 422);
             }
-            $contractNumber = trim((string)($contractPayload['contractNumber'] ?? $contract['reference']));
+            $contractNumber = hsContractRecordNumber($contract);
             $collected = 0.0;
             foreach (hsPostedCollections($records) as $row) {
+                if (!hsRecordReferencesContract($row, $contract, $records)) continue;
                 $payload = $row['payload'];
-                $matches = trim((string)($payload['contractNumber'] ?? '')) === $contractNumber
-                    || (int)($payload['contractRecordId'] ?? $payload['contractId'] ?? 0) === $contractId;
-                $allocation = null;
-                if (is_array($payload['allocations'] ?? null)) {
-                    foreach ($payload['allocations'] as $item) {
-                        if (!is_array($item)) continue;
-                        if ((int)($item['contractId'] ?? 0) === $contractId) {
-                            $matches = true;
-                            $allocation = $item;
-                            break;
-                        }
-                    }
-                }
-                if ($matches) $collected += (float)($allocation['amount'] ?? $payload['amount'] ?? 0);
+                $allocation = hsFinancialAllocationForContract($row, $contract, $records);
+                $collected += (float)(is_array($payload['allocations'] ?? null)
+                    ? ($allocation['amount'] ?? 0)
+                    : ($payload['amount'] ?? 0));
             }
             $returned = 0.0;
             foreach ($records as $row) {
                 if ($row['kind'] !== 'payment_return' || $row['status'] !== 'posted') continue;
-                $payload = $row['payload'];
-                if ((int)($payload['contractRecordId'] ?? $payload['contractId'] ?? 0) === $contractId
-                    || trim((string)($payload['contractNumber'] ?? '')) === $contractNumber) {
-                    $returned += (float)($payload['amount'] ?? 0);
+                if (hsRecordReferencesContract($row, $contract, $records)) {
+                    $returned += (float)($row['payload']['amount'] ?? $row['payload']['total'] ?? 0);
                 }
             }
             $total = (float)($contractPayload['total'] ?? $contractPayload['amount'] ?? 0);
@@ -1383,8 +1508,7 @@ function hsUpdateContainerContractLifecycle(PDO $pdo, int $contractId, string $a
             foreach ($records as $invoice) {
                 if ($invoice['kind'] !== 'invoice' || $invoice['status'] === 'archived') continue;
                 $invoicePayload = $invoice['payload'];
-                if ((int)($invoicePayload['contractRecordId'] ?? 0) !== $contractId
-                    && trim((string)($invoicePayload['contractNumber'] ?? '')) !== $contractNumber) continue;
+                if (!hsInvoiceBelongsToContract($invoice, $contract)) continue;
                 $invoiceTotal = (float)($invoicePayload['total'] ?? $invoicePayload['amount'] ?? 0);
                 if (!is_finite($invoiceTotal) || $invoiceTotal <= 0.01) continue;
                 $invoiceRemaining = (float)($invoicePayload['remaining'] ?? ($invoiceTotal - (float)($invoicePayload['paid'] ?? 0)));
@@ -2237,41 +2361,23 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         $deposits = array_filter($rows, static fn(array $row): bool => in_array($row['kind'], ['deposit', 'bank_deposit'], true) && $row['status'] === 'posted');
         $ledgers = [];
         foreach ($contracts as $contract) {
-            $payload = $contract['payload']; $number = (string)($payload['contractNumber'] ?? $contract['reference']);
-            $relatedPayments = array_values(array_filter($payments, static function (array $row) use ($contract, $number): bool {
-                if ((string)($row['payload']['contractNumber'] ?? '') === $number
-                    || (int)($row['payload']['contractRecordId'] ?? $row['payload']['contractId'] ?? 0) === (int)$contract['id']) return true;
-                foreach (($row['payload']['allocations'] ?? []) as $allocation) {
-                    if ((int)($allocation['contractId'] ?? 0) === (int)$contract['id']) return true;
-                }
-                return false;
-            }));
-            $relatedReturns = array_values(array_filter($returns, static function (array $row) use ($contract, $number, $rows): bool {
-                $payload = $row['payload'];
-                if ((string)($payload['contractNumber'] ?? '') === $number
-                    || (int)($payload['contractRecordId'] ?? $payload['contractId'] ?? 0) === (int)$contract['id']) return true;
-                $invoiceId = (int)($payload['originalInvoiceId'] ?? $payload['invoiceRecordId'] ?? 0);
-                if ($invoiceId <= 0) return false;
-                foreach ($rows as $invoice) {
-                    if ($invoice['kind'] !== 'invoice' || (int)$invoice['id'] !== $invoiceId) continue;
-                    $invoicePayload = $invoice['payload'];
-                    return (int)($invoicePayload['contractRecordId'] ?? 0) === (int)$contract['id']
-                        || (string)($invoicePayload['contractNumber'] ?? '') === $number;
-                }
-                return false;
-            }));
-            $relatedDeposits = array_values(array_filter($deposits, static function (array $row) use ($relatedPayments, $contract, $number): bool {
-                $payload = $row['payload'];
-                if ((string)($payload['contractNumber'] ?? '') === $number || (int)($payload['linkedContractId'] ?? 0) === (int)$contract['id']) return true;
+            $payload = $contract['payload']; $number = hsContractRecordNumber($contract);
+            $relatedPayments = array_values(array_filter($payments, static fn(array $row): bool =>
+                hsRecordReferencesContract($row, $contract, $rows)));
+            $relatedReturns = array_values(array_filter($returns, static fn(array $row): bool =>
+                hsRecordReferencesContract($row, $contract, $rows)));
+            $relatedDeposits = array_values(array_filter($deposits, static function (array $row) use ($relatedPayments, $contract, $rows): bool {
+                if (hsRecordReferencesContract($row, $contract, $rows)) return true;
                 foreach ($relatedPayments as $payment) {
-                    if ((int)($payload['sourcePaymentId'] ?? $payload['linkedPaymentId'] ?? 0) === (int)$payment['id']) return true;
+                    if ((int)($row['payload']['sourcePaymentId'] ?? $row['payload']['linkedPaymentId'] ?? 0) === (int)$payment['id']) return true;
                 }
                 return false;
             }));
             $total = (float)($payload['total'] ?? $payload['amount'] ?? 0); $collected = array_sum(array_map(static fn(array $row): float => (float)($row['payload']['amount'] ?? 0), $relatedPayments));
-            $collected = array_sum(array_map(static function (array $row) use ($contract): float {
-                foreach (($row['payload']['allocations'] ?? []) as $allocation) {
-                    if ((int)($allocation['contractId'] ?? 0) === (int)$contract['id']) return (float)($allocation['amount'] ?? 0);
+            $collected = array_sum(array_map(static function (array $row) use ($contract, $rows): float {
+                if (is_array($row['payload']['allocations'] ?? null)) {
+                    $allocation = hsFinancialAllocationForContract($row, $contract, $rows);
+                    return (float)($allocation['amount'] ?? 0);
                 }
                 return (float)($row['payload']['amount'] ?? 0);
             }, $relatedPayments));
@@ -2289,18 +2395,77 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         $operationKey = trim((string)($_SERVER['HTTP_IDEMPOTENCY_KEY'] ?? $input['operationKey'] ?? ''));
         $rows = array_map('hsRecord', hsFindRecords($pdo));
         $requestedInvoiceId = (int)($input['invoiceId'] ?? $input['invoiceRecordId'] ?? 0);
+        $requestedCustomerId = (int)($input['customerRecordId'] ?? 0);
+        $requestedCustomer = null;
+        if ($requestedCustomerId > 0) {
+            foreach ($rows as $row) {
+                if ($row['kind'] === 'customer' && (int)$row['id'] === $requestedCustomerId && $row['status'] !== 'archived') {
+                    $requestedCustomer = $row;
+                    break;
+                }
+            }
+            if (!$requestedCustomer) hsJson(['error' => 'العميل المحدد غير موجود أو مؤرشف'], 422);
+        }
+        $requestedInvoiceNumber = trim((string)($input['invoiceNumber'] ?? ''));
+        $requestedContractFromBody = (int)($input['contractId'] ?? 0);
+        $invoiceCandidates = [];
+        if ($requestedInvoiceId <= 0 && $requestedInvoiceNumber !== '') {
+            foreach ($rows as $row) {
+                if ($row['kind'] !== 'invoice' || $row['status'] === 'archived') continue;
+                $invoicePayload = $row['payload'];
+                $candidateNumber = trim((string)($invoicePayload['invoiceNumber'] ?? $row['reference'] ?? ''));
+                if ($candidateNumber !== $requestedInvoiceNumber) continue;
+                if ($requestedCustomerId > 0) {
+                    $invoiceCustomerId = (int)($invoicePayload['customerRecordId'] ?? 0);
+                    if ($invoiceCustomerId > 0 && $invoiceCustomerId !== $requestedCustomerId) continue;
+                    $linkedContractId = (int)($invoicePayload['contractRecordId'] ?? $invoicePayload['contractId'] ?? $invoicePayload['linkedContractId'] ?? 0);
+                    if ($linkedContractId > 0) {
+                        $linkedContract = null;
+                        foreach ($rows as $candidate) {
+                            if ($candidate['kind'] === 'contract' && (int)$candidate['id'] === $linkedContractId) {
+                                $linkedContract = $candidate;
+                                break;
+                            }
+                        }
+                        if (!$linkedContract) continue;
+                        $linkedCustomerId = (int)($linkedContract['payload']['customerRecordId'] ?? 0);
+                        if ($linkedCustomerId > 0 && $linkedCustomerId !== $requestedCustomerId) continue;
+                        if (!hsInvoiceBelongsToContract($row, $linkedContract)) continue;
+                    }
+                }
+                if ($requestedContractFromBody > 0) {
+                    $requestedContract = null;
+                    foreach ($rows as $candidate) {
+                        if ($candidate['kind'] === 'contract' && (int)$candidate['id'] === $requestedContractFromBody) {
+                            $requestedContract = $candidate;
+                            break;
+                        }
+                    }
+                    if (!$requestedContract || !hsInvoiceBelongsToContract($row, $requestedContract)) continue;
+                }
+                $invoiceCandidates[] = $row;
+            }
+        }
         $requestedInvoice = null;
         foreach ($rows as $row) {
             if ($row['kind'] !== 'invoice' || $row['status'] === 'archived') continue;
             $invoiceNumber = trim((string)($row['payload']['invoiceNumber'] ?? $row['reference'] ?? ''));
-            if (($requestedInvoiceId > 0 && (int)$row['id'] === $requestedInvoiceId)
-                || ($requestedInvoiceId <= 0 && trim((string)($input['invoiceNumber'] ?? '')) !== ''
-                    && $invoiceNumber === trim((string)$input['invoiceNumber']))) {
+            if ($requestedInvoiceId > 0 && (int)$row['id'] === $requestedInvoiceId) {
                 $requestedInvoice = $row;
                 break;
             }
         }
+        if ($requestedInvoiceId <= 0 && count($invoiceCandidates) > 1) {
+            hsJson(['error' => 'رقم الفاتورة غير فريد؛ اختر الفاتورة من القائمة'], 422);
+        }
+        if ($requestedInvoiceId <= 0 && count($invoiceCandidates) === 1) $requestedInvoice = $invoiceCandidates[0];
         $requestedInvoicePayload = $requestedInvoice['payload'] ?? [];
+        if ($requestedCustomerId > 0 && $requestedInvoice) {
+            $invoiceCustomerId = (int)($requestedInvoicePayload['customerRecordId'] ?? 0);
+            if ($invoiceCustomerId > 0 && $invoiceCustomerId !== $requestedCustomerId) {
+                hsJson(['error' => 'الفاتورة لا تتبع العميل المحدد'], 422);
+            }
+        }
         $requestedContractId = (int)($input['contractId'] ?? $requestedInvoicePayload['contractRecordId'] ?? 0);
         if ($requestedContractId <= 0 && $requestedInvoice) {
             $requestedContractNumber = trim((string)($requestedInvoicePayload['contractNumber'] ?? ''));
@@ -2344,44 +2509,46 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             $contract = null;
             foreach ($rows as $row) if ($row['kind'] === 'contract' && (int)$row['id'] === $allocation['contractId'] && $row['status'] !== 'archived') $contract = $row;
             if (!$contract) hsJson(['error' => 'أحد العقود غير موجود أو مؤرشف'], 422);
-            $number = (string)($contract['payload']['contractNumber'] ?? $contract['reference']);
+            $number = hsContractRecordNumber($contract);
+            if ($requestedCustomerId > 0) {
+                $contractCustomerId = (int)($contract['payload']['customerRecordId'] ?? 0);
+                $customerPayload = $requestedCustomer['payload'] ?? [];
+                $expectedCustomerName = trim((string)($customerPayload['name'] ?? $customerPayload['customerName'] ?? ''));
+                $contractCustomerName = trim((string)($contract['payload']['customerName'] ?? ''));
+                if ($contractCustomerId > 0
+                    ? $contractCustomerId !== $requestedCustomerId
+                    : ($expectedCustomerName === '' || $contractCustomerName !== $expectedCustomerName)) {
+                    hsJson(['error' => 'العقد لا يتبع العميل المحدد'], 422);
+                }
+            }
             $paid = 0.0;
             foreach (hsPostedCollections($rows) as $row) {
-                foreach (($row['payload']['allocations'] ?? []) as $item) {
-                    if ((int)($item['contractId'] ?? 0) === $allocation['contractId']) $paid += (float)($item['amount'] ?? 0);
+                if (!hsRecordReferencesContract($row, $contract, $rows)) continue;
+                if (is_array($row['payload']['allocations'] ?? null)) {
+                    $matchingAllocation = hsFinancialAllocationForContract($row, $contract, $rows);
+                    $paid += (float)($matchingAllocation['amount'] ?? 0);
+                } else {
+                    $paid += (float)($row['payload']['amount'] ?? 0);
                 }
-                if (!isset($row['payload']['allocations']) && (string)($row['payload']['contractNumber'] ?? '') === $number) $paid += (float)($row['payload']['amount'] ?? 0);
             }
             foreach ($returnRows as $refund) {
                 $refundPayload = $refund['payload'];
-                $matches = (int)($refundPayload['contractRecordId'] ?? $refundPayload['contractId'] ?? 0) === $allocation['contractId']
-                    || (string)($refundPayload['contractNumber'] ?? '') === $number;
-                if (!$matches && !empty($refundPayload['originalPaymentId'])) {
-                    foreach (hsPostedCollections($rows) as $payment) {
-                        if ((int)$payment['id'] === (int)$refundPayload['originalPaymentId'] &&
-                            ((string)($payment['payload']['contractNumber'] ?? '') === $number ||
-                             (int)($payment['payload']['contractRecordId'] ?? 0) === $allocation['contractId'])) {
-                            $matches = true;
-                            break;
-                        }
-                    }
-                }
+                $matches = hsRecordReferencesContract($refund, $contract, $rows);
                 if ($matches) $paid -= (float)($refundPayload['amount'] ?? $refundPayload['total'] ?? 0);
             }
             $paid = max($paid, 0);
             $total = (float)($contract['payload']['total'] ?? $contract['payload']['amount'] ?? 0);
             if ($total > 0 && $paid + $allocation['amount'] > $total + 0.01) hsJson(['error' => 'قيمة التحصيل تتجاوز المتبقي في العقد'], 422);
-            $contractInvoices = array_values(array_filter($rows, static function (array $row) use ($allocation, $contract, $number): bool {
-                if ($row['kind'] !== 'invoice' || $row['status'] === 'archived') return false;
-                return (int)($row['payload']['contractRecordId'] ?? 0) === $allocation['contractId']
-                    || (string)($row['payload']['contractNumber'] ?? '') === $number;
-            }));
+            $contractInvoices = array_values(array_filter($rows, static fn(array $row): bool =>
+                $row['status'] !== 'archived' && hsInvoiceBelongsToContract($row, $contract)));
             if ($contractInvoices !== [] && $allocation['invoiceId'] === null) {
                 hsJson(['error' => 'حدد فاتورة مرحّلة للتحصيل في العقد ' . $number], 422);
             }
             if ($allocation['invoiceId']) {
                 $invoice = null; foreach ($rows as $row) if ($row['kind'] === 'invoice' && (int)$row['id'] === $allocation['invoiceId']) $invoice = $row;
-                  if (!$invoice || $invoice['status'] === 'archived' || ((int)($invoice['payload']['contractRecordId'] ?? 0) !== $allocation['contractId'] && (string)($invoice['payload']['contractNumber'] ?? '') !== $number)) hsJson(['error' => 'الفاتورة لا تتبع العقد المحدد'], 422);
+                  if (!$invoice || $invoice['status'] === 'archived' || !hsInvoiceBelongsToContract($invoice, $contract)) hsJson(['error' => 'الفاتورة لا تتبع العقد المحدد'], 422);
+                  $invoiceCustomerId = (int)($invoice['payload']['customerRecordId'] ?? 0);
+                  if ($requestedCustomerId > 0 && $invoiceCustomerId > 0 && $invoiceCustomerId !== $requestedCustomerId) hsJson(['error' => 'الفاتورة لا تتبع العميل المحدد'], 422);
                   $invoiceTotal = (float)($invoice['payload']['total'] ?? $invoice['payload']['amount'] ?? 0);
                   $canIssueContractInvoice = $invoiceTotal > 0
                       && !in_array($invoice['status'], ['cancelled', 'rejected', 'archived'], true);

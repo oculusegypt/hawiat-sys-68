@@ -6,6 +6,10 @@ import { useGetContainerSystem, type ContainerSystemRecord } from "@workspace/ap
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  contractDisplayNumber,
+  invoiceContractForRecord,
+} from "@/lib/containerFinancialRelations"
 
 const money = (value: number) => `${value.toLocaleString("ar-SA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ر.س`
 const payloadOf = (record?: ContainerSystemRecord) => (record?.payload ?? {}) as Record<string, unknown>
@@ -19,20 +23,6 @@ const allocatedAmount = (record: ContainerSystemRecord, invoiceId: number) => {
     return Number(allocation.invoiceId) === invoiceId ? sum + Number(allocation.amount ?? 0) : sum
   }, 0)
 }
-const findInvoiceContract = (records: ContainerSystemRecord[], invoice: ContainerSystemRecord, customer?: ContainerSystemRecord, container?: ContainerSystemRecord) => {
-  const p = payloadOf(invoice)
-  const contractId = Number(p.contractRecordId ?? p.contractId ?? p.linkedContractId ?? 0)
-  const contractNumber = value(p.contractNumber ?? p.contractNo, "")
-  const customerName = value(p.customerName ?? payloadOf(customer).name, "")
-  const containerCode = value(p.containerCode ?? payloadOf(container).assetCode ?? payloadOf(container).containerCode, "")
-  return records.find(item => item.kind === "contract" && item.id === contractId)
-    ?? records.find(item => item.kind === "contract" && contractNumber !== "" &&
-      value(payloadOf(item).contractNumber ?? item.reference, "") === contractNumber)
-    ?? records.find(item => item.kind === "contract" && customerName !== "" &&
-      value(payloadOf(item).customerName, "") === customerName &&
-      (containerCode === "" || value(payloadOf(item).containerCode ?? payloadOf(item).assetCode, "") === containerCode))
-}
-
 function statusInfo(status: string, total: number, paid: number, dueDate: string) {
   if (status === "cancelled") return { label: "ملغاة", className: "border-rose-200 bg-rose-50 text-rose-800" }
   if (total > 0 && paid >= total) return { label: "مدفوعة", className: "border-emerald-200 bg-emerald-50 text-emerald-800" }
@@ -59,14 +49,22 @@ export default function InvoicePrintPage() {
   const p = payloadOf(record)
   const customer = records.find(item => item.kind === "customer" && item.id === Number(p.customerRecordId))
   const container = records.find(item => ["container", "container_asset"].includes(item.kind) && item.id === Number(p.containerRecordId))
-  const contract = findInvoiceContract(records, record!, customer, container)
+  const contract = record
+    ? invoiceContractForRecord(record, records.filter(item => item.kind === "contract"))
+    : undefined
   const site = records.find(item => item.kind === "customer_site" && item.id === Number(p.siteRecordId))
   const payments = records.filter(item => {
     if (item.kind !== "payment" || item.status !== "posted") return false
     const payment = payloadOf(item)
-    return allocatedAmount(item, id) > 0 ||
-      Number(payment.invoiceRecordId) === id ||
-      value(payment.invoiceNumber, "") === value(p.invoiceNumber ?? record?.reference, "")
+    if (Array.isArray(payment.allocations)) return allocatedAmount(item, id) > 0
+    const directInvoiceId = Number(payment.invoiceRecordId ?? payment.invoiceId ?? 0)
+    if (directInvoiceId > 0) return directInvoiceId === id
+    const paymentCustomerId = Number(payment.customerRecordId ?? 0)
+    const invoiceCustomerId = Number(p.customerRecordId ?? 0)
+    if (paymentCustomerId > 0 && invoiceCustomerId > 0 && paymentCustomerId !== invoiceCustomerId) return false
+    const paymentInvoiceNumber = value(payment.invoiceNumber, "")
+    const invoiceNumber = value(p.invoiceNumber ?? record?.reference, "")
+    return Boolean(paymentInvoiceNumber && invoiceNumber && paymentInvoiceNumber === invoiceNumber)
   })
   const paid = payments.reduce((sum, item) => {
     const payment = payloadOf(item)
@@ -87,7 +85,9 @@ export default function InvoicePrintPage() {
   const contractId = contract?.id ?? Number(p.contractRecordId)
   const containerId = container?.id ?? Number(p.containerRecordId)
   const containerCode = value(p.containerCode ?? payloadOf(container).assetCode ?? payloadOf(container).code)
-  const contractNumber = value(p.contractNumber ?? payloadOf(contract).contractNumber ?? contract?.reference)
+  const contractNumber = contract
+    ? contractDisplayNumber(contract)
+    : value(p.contractNumber, value(p.contractNo, "غير مرتبط"))
 
   return <div dir="rtl" className="invoice-details-view min-h-screen bg-slate-100 p-4 sm:p-8">
      <style>{`@page{size:A4;margin:0}@media print{

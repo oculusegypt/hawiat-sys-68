@@ -26,6 +26,11 @@ import {
   useUpdateContainerSystemRecord,
 } from "@workspace/api-client-react"
 import type { ContainerSystemRecord } from "@workspace/api-client-react"
+import {
+  contractDisplayNumber,
+  invoiceBelongsToContract,
+  invoiceContractDisplayNumber,
+} from "@/lib/containerFinancialRelations"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -1666,12 +1671,35 @@ function recordDisplayName(record: ContainerSystemRecord | undefined, fallback: 
   return String(payload.name ?? payload.customerName ?? payload.contractNumber ?? payload.assetCode ?? record.reference ?? fallback)
 }
 
-function coordinatesFromLocation(location: string) {
-  const match = location.match(/(?:إحداثيات\s*GPS\s*تقريبية|إحداثيات\s*تقريبية|إحداثيات\s*GPS|GPS\s*تقريبية|GPS)\s*[:：]\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/i)
-  if (!match) return null
-  const lat = Number(match[1])
-  const lng = Number(match[2])
-  return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 ? { lat, lng } : null
+function validCoordinates(latValue: unknown, lngValue: unknown) {
+  const lat = Number(latValue)
+  const lng = Number(lngValue)
+  return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180
+    ? { lat, lng }
+    : null
+}
+
+function coordinatesFromLocation(location: unknown) {
+  if (location && typeof location === "object") {
+    const point = location as Record<string, unknown>
+    const direct = validCoordinates(point.latitude ?? point.lat, point.longitude ?? point.lng ?? point.lon)
+    if (direct) return direct
+    location = point.location ?? point.address ?? ""
+  }
+
+  const text = String(location ?? "")
+  const explicit = text.match(/(?:إحداثيات\s*GPS\s*تقريبية|إحداثيات\s*تقريبية|إحداثيات\s*GPS|GPS\s*تقريبية|GPS)\s*[:：]\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/i)
+  const pair = explicit ?? text.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/)
+  return pair ? validCoordinates(pair[1], pair[2]) : null
+}
+
+function locationAddress(location: unknown) {
+  const text = typeof location === "string" ? location : ""
+  if (!text.trim() || coordinatesFromLocation(text) && /^\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*$/.test(text)) return ""
+  return text
+    .replace(/(?:[\s،,;]*)(?:إحداثيات\s*GPS\s*تقريبية|إحداثيات\s*تقريبية|إحداثيات\s*GPS|GPS\s*تقريبية|GPS)\s*[:：]\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?/gi, "")
+    .replace(/[\s،,;]+$/u, "")
+    .trim()
 }
 
 function contractReadableValue(value: unknown) {
@@ -1731,11 +1759,14 @@ function ContractRecordDetails({
   const containerPayload = linkedContainer?.payload as Record<string, unknown> | undefined
   const customerName = String(payload.customerName ?? payload.clientName ?? customerPayload?.name ?? customerPayload?.customerName ?? linkedCustomer?.reference ?? "عميل غير محدد")
   const customerPhone = String(payload.customerPhone ?? payload.phone ?? payload.mobile ?? customerPayload?.phone ?? customerPayload?.mobile ?? "").trim()
-  const location = String(payload.location ?? payload.serviceAddress ?? payload.siteAddress ?? sitePayload?.address ?? sitePayload?.location ?? sitePayload?.name ?? "").trim()
+  const rawLocation = String(payload.location ?? payload.serviceAddress ?? payload.siteAddress ?? sitePayload?.address ?? sitePayload?.location ?? sitePayload?.name ?? "").trim()
+  const location = locationAddress(rawLocation)
   const latitude = Number(payload.latitude ?? payload.lat ?? sitePayload?.latitude ?? sitePayload?.lat)
   const longitude = Number(payload.longitude ?? payload.lng ?? payload.lon ?? sitePayload?.longitude ?? sitePayload?.lng ?? sitePayload?.lon)
-  const coordinates = Number.isFinite(latitude) && Number.isFinite(longitude) ? { lat: latitude, lng: longitude } : coordinatesFromLocation(location)
-  const contractNumber = String(payload.contractNumber ?? payload.number ?? record.reference ?? `CON-${record.id}`)
+  const coordinates = Number.isFinite(latitude) && Number.isFinite(longitude)
+    ? validCoordinates(latitude, longitude)
+    : coordinatesFromLocation(payload.locationCoordinates ?? sitePayload?.locationCoordinates ?? rawLocation)
+  const contractNumber = contractDisplayNumber(record)
   const serviceType = String(payload.serviceType ?? payload.contractType ?? payload.typeName ?? payload.description ?? "").trim()
   const serviceLabel = serviceType ? contractReadableValue(serviceType) : ""
   const startDate = String(payload.startDate ?? payload.fromDate ?? payload.contractStartDate ?? "").slice(0, 10)
@@ -1752,14 +1783,8 @@ function ContractRecordDetails({
   const remainingAmount = totalAmount !== undefined && paidAmount !== undefined ? Math.max(totalAmount - paidAmount, 0) : undefined
   const hasMoney = [baseAmount, taxAmountValue, totalAmount, paidAmount, remainingAmount].some(value => value !== undefined && value > 0)
   const money = (value: number | undefined) => value === undefined ? "—" : `${value.toLocaleString("ar-SA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ر.س`
-  const normalizedContractNumber = contractNumber.trim()
   const contractInvoices = allRecords.filter(item => {
-    if (item.kind !== "invoice" || item.status === "archived") return false
-    const invoicePayload = item.payload as Record<string, unknown>
-    const invoiceContractId = Number(invoicePayload.contractRecordId ?? 0)
-    const invoiceContractNumber = String(invoicePayload.contractNumber ?? "").trim()
-    return (invoiceContractId > 0 && invoiceContractId === record.id) ||
-      Boolean(normalizedContractNumber && invoiceContractNumber && invoiceContractNumber === normalizedContractNumber)
+    return item.kind === "invoice" && item.status !== "archived" && invoiceBelongsToContract(item, record)
   })
   const linkedRequest = serviceRequests.find(request => Number((request as ServiceRequest & { contractRecordId?: number }).contractRecordId ?? 0) === record.id || request.id === Number(payload.requestId ?? 0))
   const proofPhotoUrl = String(payload.driverProofPhotoUrl ?? payload.proofPhotoUrl ?? linkedRequest?.driverProofPhotoUrl ?? "").trim()
@@ -1895,6 +1920,14 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
         invoiceNumber: record.payload.invoiceNumber ?? sourcePaymentPayload?.invoiceNumber,
         paymentMethod: record.payload.paymentMethod ?? sourcePaymentPayload?.paymentMethod,
       }
+    : record.kind === "invoice"
+      ? {
+          ...record.payload,
+          contractNumber: invoiceContractDisplayNumber(
+            record,
+            allRecords.filter(item => item.kind === "contract"),
+          ),
+        }
     : record.payload
   const delivered = record.status === "delivered" || Boolean(detailPayload.deliverAt)
   const returned = record.status === "returned" || Boolean(detailPayload.returnAt)
@@ -1967,22 +2000,23 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
   const linkedCustomerId = linkedCustomer?.id ?? (detailPayload.customerRecordId ? Number(detailPayload.customerRecordId) : null)
   const customerRecords = allRecords.filter(item => {
     const payload = item.payload as Record<string, unknown>
-    return (linkedCustomerId && String(payload.customerRecordId ?? "") === String(linkedCustomerId)) ||
-      (customerName && String(payload.customerName ?? "").trim() === customerName.trim()) ||
-      String(payload.customerRecordId ?? "") === String(record.id)
+    const payloadCustomerId = Number(payload.customerRecordId ?? payload.customerId ?? 0)
+    if (payloadCustomerId > 0) {
+      return payloadCustomerId === linkedCustomerId || payloadCustomerId === record.id
+    }
+    const linkedContractId = Number(payload.contractRecordId ?? payload.contractId ?? 0)
+    if (linkedContractId > 0) {
+      const linkedContract = allRecords.find(candidate => candidate.kind === "contract" && candidate.id === linkedContractId)
+      if (!linkedContract) return false
+      const contractCustomerId = Number((linkedContract.payload as Record<string, unknown>).customerRecordId ?? 0)
+      if (contractCustomerId > 0) return contractCustomerId === linkedCustomerId || contractCustomerId === record.id
+    }
+    return Boolean(customerName && String(payload.customerName ?? "").trim() === customerName.trim())
   })
   const customerContracts = customerRecords.filter(item => item.kind === "contract")
   const customerInvoices = customerRecords.filter(item => item.kind === "invoice")
-  const recordContractNumber = String(record.payload.contractNumber ?? record.reference ?? "").trim()
   const contractInvoices = record.kind === "contract"
-    ? allRecords.filter(item => {
-        if (item.kind !== "invoice" || item.status === "archived") return false
-        const invoicePayload = item.payload as Record<string, unknown>
-        const invoiceContractId = Number(invoicePayload.contractRecordId ?? 0)
-        const invoiceContractNumber = String(invoicePayload.contractNumber ?? "").trim()
-        return (invoiceContractId > 0 && invoiceContractId === record.id) ||
-          Boolean(recordContractNumber && invoiceContractNumber && invoiceContractNumber === recordContractNumber)
-      })
+    ? allRecords.filter(item => item.status !== "archived" && invoiceBelongsToContract(item, record))
     : []
   const customerPaymentsRecords = customerRecords.filter(item => ["payment", "receipt"].includes(item.kind))
   const customerPayments = customerRecords.filter(item => ["payment", "receipt"].includes(item.kind)).reduce((sum, item) => sum + amountOf(item), 0)
@@ -1991,8 +2025,15 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
     .filter(item => ["expense", "fuel_expense", "maintenance"].includes(item.kind))
     .filter(item => {
       const payload = item.payload as Record<string, unknown>
-      return String(payload.customerName ?? payload.contractNumber ?? "") === customerName ||
-        customerContracts.some(contract => String(payload.contractNumber ?? "") === String(contract.payload.contractNumber ?? ""))
+      const expenseCustomerId = Number(payload.customerRecordId ?? 0)
+      if (expenseCustomerId > 0) return expenseCustomerId === linkedCustomerId
+      const expenseContractId = Number(payload.contractRecordId ?? payload.contractId ?? 0)
+      if (expenseContractId > 0) return customerContracts.some(contract => contract.id === expenseContractId)
+      const expenseContractNumber = String(payload.contractNumber ?? "").trim()
+      if (expenseContractNumber) {
+        return customerContracts.some(contract => contractDisplayNumber(contract) === expenseContractNumber)
+      }
+      return Boolean(customerName && String(payload.customerName ?? "").trim() === customerName.trim())
     })
     .reduce((sum, item) => sum + amountOf(item), 0)
   const customerProfit = customerCharges - customerExpenses
@@ -2039,14 +2080,13 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
     ((item as ServiceRequest & { containerRecordId?: number | null; customerRecordId?: number | null }).containerRecordId === record.id && (!latestContractPayload.customerName || item.clientName === latestContractPayload.customerName)) ||
     ((item as ServiceRequest & { containerRecordId?: number | null; customerRecordId?: number | null }).customerRecordId === record.id && (!customerName || item.clientName === customerName))
   )
-  const requestLocation = linkedRequest?.location ?? String(latestContractPayload.location ?? linkedSite?.payload.address ?? linkedSite?.payload.location ?? "")
+  const rawRequestLocation = linkedRequest?.location ?? String(latestContractPayload.location ?? linkedSite?.payload.address ?? linkedSite?.payload.location ?? "")
+  const requestLocation = locationAddress(rawRequestLocation)
   const requestCoordinates = coordinatesFromLocation(
-    String(
-      (linkedRequest as ServiceRequest & { locationCoordinates?: string | null } | undefined)?.locationCoordinates ||
-      latestContractPayload.locationCoordinates ||
-      linkedSite?.payload.locationCoordinates ||
-      requestLocation,
-    ),
+    (linkedRequest as ServiceRequest & { locationCoordinates?: unknown } | undefined)?.locationCoordinates ??
+      latestContractPayload.locationCoordinates ??
+      linkedSite?.payload.locationCoordinates ??
+      rawRequestLocation,
   )
   const proofPhotoUrl = String(
     detailPayload.driverProofPhotoUrl ??
