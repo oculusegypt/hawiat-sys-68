@@ -227,4 +227,53 @@ expectSame(false, hsRecordReferencesContract($legacyPayment, $contractB, $relati
 expectSame(45, (int)(hsFinancialAllocationForContract($legacyPayment, $contractA, $relationRecords)['amount'] ?? 0),
     'PHP must preserve the amount allocated through an invoice ID');
 
+$settlementInvoice = [
+    'id' => 91,
+    'kind' => 'invoice',
+    'status' => 'paid',
+    'reference' => 'TEST-INVOICE-SETTLEMENT',
+    'payload' => ['invoiceNumber' => 'TEST-INVOICE-SETTLEMENT', 'customerRecordId' => 22, 'total' => 100, 'paid' => 100, 'remaining' => 0, 'invoiceStatus' => 'paid'],
+];
+$settlementPayment = [
+    'id' => 92,
+    'kind' => 'payment',
+    'status' => 'posted',
+    'reference' => 'TEST-PAYMENT-SETTLEMENT',
+    'payload' => ['customerRecordId' => 22, 'invoiceRecordId' => 91, 'amount' => 100],
+];
+$settlementReturn = [
+    'id' => 93,
+    'kind' => 'payment_return',
+    'status' => 'posted',
+    'reference' => 'TEST-RETURN-SETTLEMENT',
+    'payload' => ['customerRecordId' => 22, 'originalPaymentId' => 92, 'amount' => 30],
+];
+$settlementRows = [$settlementInvoice, $settlementPayment, $settlementReturn];
+$partialInvoiceSync = hsInvoiceSettlementUpdatesForRecord($settlementReturn, $settlementRows);
+expectSame(1, count($partialInvoiceSync), 'posting a payment return must identify its linked invoice');
+expectSame('partially_paid', $partialInvoiceSync[0]['status'],
+    'posting a payment return must move a paid invoice back to partially paid');
+expectSame(70, (int)$partialInvoiceSync[0]['payload']['paid'],
+    'the stored invoice paid amount must reflect posted payment returns');
+expectSame(30, (int)$partialInvoiceSync[0]['payload']['remaining'],
+    'the stored invoice remaining amount must reflect posted payment returns');
+$cancelledSettlementReturn = array_merge($settlementReturn, ['status' => 'cancelled']);
+$staleInvoiceAfterReturn = array_merge($settlementInvoice, [
+    'status' => 'partially_paid',
+    'payload' => array_merge($settlementInvoice['payload'], [
+        'paid' => 70,
+        'remaining' => 30,
+        'invoiceStatus' => 'partially_paid',
+    ]),
+]);
+$cancelledInvoiceSync = hsInvoiceSettlementUpdatesForRecord($cancelledSettlementReturn, [
+    $staleInvoiceAfterReturn,
+    $settlementPayment,
+    $cancelledSettlementReturn,
+]);
+expectSame('paid', $cancelledInvoiceSync[0]['status'],
+    'cancelling a posted payment return must restore the invoice paid status');
+expectSame(0, (int)$cancelledInvoiceSync[0]['payload']['remaining'],
+    'cancelling a posted payment return must restore the invoice balance');
+
 echo "PHP financial-method, invoice-relationship, and initial-status assertions passed\n";

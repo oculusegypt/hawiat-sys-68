@@ -189,7 +189,7 @@ async function main() {
     testData: true,
   });
   const assignmentTargetContainer = insertRecord("container_asset", "available", "TEST-ASSIGNMENT-NEW-001", {
-    assetCode: "TEST-ASSIGNMENT-NEW-001",
+    containerCode: "TEST-ASSIGNMENT-NEW-001",
     status: "available",
     testData: true,
   });
@@ -1538,6 +1538,40 @@ async function main() {
     assert.ok(postedRefundTotal <= 50.01, "concurrent partial refunds must not exceed the original payment");
     assert.ok(refundPostingResponses.some(response => response.status === 422),
       "at least one concurrent refund that exceeds the original payment must be rejected");
+    const invoiceAfterRefunds = db.select().from(containerSystemRecordsTable)
+      .where(eq(containerSystemRecordsTable.id, invoice.id)).get();
+    const invoiceAfterRefundsPayload = JSON.parse(invoiceAfterRefunds!.payload) as Record<string, unknown>;
+    const expectedPaidAfterRefunds = Math.max(50 - postedRefundTotal, 0);
+    const expectedInvoiceStatusAfterRefunds = expectedPaidAfterRefunds <= 0.01
+      ? "due"
+      : expectedPaidAfterRefunds >= 99.99 ? "paid" : "partially_paid";
+    assert.ok(Math.abs(Number(invoiceAfterRefundsPayload.paid) - expectedPaidAfterRefunds) < 0.01,
+      "posting a payment return must synchronize the stored invoice paid amount");
+    assert.ok(Math.abs(Number(invoiceAfterRefundsPayload.remaining) - (100 - expectedPaidAfterRefunds)) < 0.01,
+      "posting a payment return must synchronize the stored invoice remaining amount");
+    assert.equal(invoiceAfterRefunds?.status, expectedInvoiceStatusAfterRefunds);
+
+    const successfulRefundIndex = refundPostingResponses.findIndex(response => response.status === 200);
+    if (successfulRefundIndex >= 0) {
+      const cancelRefund = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records/${refundIds[successfulRefundIndex]}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", authorization },
+        body: JSON.stringify({ status: "cancelled", payload: { reason: "TEST ONLY — cancel refund" } }),
+      });
+      assert.equal(cancelRefund.status, 200, await cancelRefund.clone().text());
+      const remainingPostedRefundTotal = db.select().from(containerSystemRecordsTable).all()
+        .filter(record => record.kind === "payment_return" && record.status === "posted")
+        .filter(record => Number((JSON.parse(record.payload) as Record<string, unknown>).originalPaymentId) === partialBody.payment.id)
+        .reduce((sum, record) => sum + Number((JSON.parse(record.payload) as Record<string, unknown>).amount ?? 0), 0);
+      const invoiceAfterRefundCancellation = db.select().from(containerSystemRecordsTable)
+        .where(eq(containerSystemRecordsTable.id, invoice.id)).get();
+      const invoiceAfterRefundCancellationPayload = JSON.parse(invoiceAfterRefundCancellation!.payload) as Record<string, unknown>;
+      const expectedPaidAfterRefundCancellation = Math.max(50 - remainingPostedRefundTotal, 0);
+      assert.ok(Math.abs(Number(invoiceAfterRefundCancellationPayload.paid) - expectedPaidAfterRefundCancellation) < 0.01,
+        "cancelling a payment return must restore the stored invoice paid amount");
+      assert.ok(Math.abs(Number(invoiceAfterRefundCancellationPayload.remaining) - (100 - expectedPaidAfterRefundCancellation)) < 0.01,
+        "cancelling a payment return must restore the stored invoice remaining amount");
+    }
 
     const invoiceReturnIds: number[] = [];
     for (let index = 1; index <= 3; index += 1) {

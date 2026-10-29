@@ -572,7 +572,7 @@ function hsInvoiceReturnAmount(array $returned, array $invoice, array $rows): fl
                 && $invoiceIds[0] === (int)$invoice['id']
                 && count(array_filter($originalAllocations, static fn(array $item): bool => (int)($item['invoiceId'] ?? 0) !== (int)$invoice['id'])) === 0;
             $originalTotal = (float)($originalPayload['amount'] ?? $originalPayload['total'] ?? 0);
-            if (!$entirelyAllocatedToInvoice && $amount + 0.01 < $originalTotal) return 0.0;
+            if ($invoiceIds !== [] && !$entirelyAllocatedToInvoice && $amount + 0.01 < $originalTotal) return 0.0;
         }
         return min($amount, $linkedAmount);
     }
@@ -601,6 +601,44 @@ function hsInvoiceNetPaidAmount(array $invoice, array $rows): float {
         }
     }
     return max($collected - $returned, 0.0);
+}
+
+function hsInvoiceSettlementUpdatesForRecord(array $record, array $rows): array {
+    $kind = (string)($record['kind'] ?? '');
+    if (!in_array($kind, ['payment', 'receipt', 'payment_return'], true)) return [];
+
+    $linkedRecord = array_merge($record, ['status' => 'posted']);
+    $updates = [];
+    foreach ($rows as $invoice) {
+        if (($invoice['kind'] ?? '') !== 'invoice' || ($invoice['status'] ?? '') === 'archived') continue;
+        $linkedAmount = $kind === 'payment_return'
+            ? hsInvoiceReturnAmount($linkedRecord, $invoice, $rows)
+            : hsInvoiceCollectionAmount($linkedRecord, $invoice, $rows);
+        if ($linkedAmount <= 0.01) continue;
+
+        $payload = hsPayload($invoice['payload'] ?? null);
+        $total = (float)($payload['total'] ?? $payload['amount'] ?? 0);
+        if (!is_finite($total) || $total <= 0.01) continue;
+        $paid = hsInvoiceNetPaidAmount($invoice, $rows);
+        $remaining = max($total - $paid, 0.0);
+        $status = $remaining <= 0.01 ? 'paid' : ($paid > 0.01 ? 'partially_paid' : 'due');
+        if (($invoice['status'] ?? '') === $status
+            && abs((float)($payload['paid'] ?? 0) - $paid) <= 0.01
+            && abs((float)($payload['remaining'] ?? $total) - $remaining) <= 0.01
+            && (string)($payload['invoiceStatus'] ?? '') === $status) {
+            continue;
+        }
+        $updates[] = [
+            'invoice' => $invoice,
+            'status' => $status,
+            'payload' => array_merge($payload, [
+                'paid' => $paid,
+                'remaining' => $remaining,
+                'invoiceStatus' => $status,
+            ]),
+        ];
+    }
+    return $updates;
 }
 
 function hsFinancialTables(PDO $pdo): void {
@@ -1121,7 +1159,11 @@ function hsReference(string $kind, array $payload, int $id): string {
 }
 
 function hsAssetCode(array $payload): string {
-    return trim((string)($payload['assetCode'] ?? $payload['code'] ?? ''));
+    foreach (['assetCode', 'containerCode', 'code', 'reference'] as $field) {
+        $code = trim((string)($payload[$field] ?? ''));
+        if ($code !== '') return $code;
+    }
+    return '';
 }
 
 function hsCanonicalAssetStatus(string $value, string $fallback = 'available'): string {
@@ -3064,6 +3106,34 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                     $ledgerStmt = $pdo->prepare("INSERT INTO container_system_records (kind, status, reference, payload, created_by, created_at, updated_at) VALUES ('ledger_entry', 'posted', :reference, :payload, :created_by, :created_at, :updated_at)");
                     $ledgerStmt->execute([':reference' => 'LED-' . $id, ':payload' => json_encode($ledger, JSON_UNESCAPED_UNICODE), ':created_by' => $actorId, ':created_at' => $now, ':updated_at' => $now]);
                 }
+                if (in_array((string)$current['kind'], ['payment', 'receipt', 'payment_return'], true)
+                    && $current['status'] !== $nextStatus
+                    && in_array((string)$current['status'], ['posted'], true) !== in_array($nextStatus, ['posted'], true)) {
+                    $syncRows = array_map('hsRecord', hsFindRecords($pdo));
+                    $syncRecord = null;
+                    foreach ($syncRows as $row) {
+                        if ((int)$row['id'] === $id) {
+                            $syncRecord = $row;
+                            break;
+                        }
+                    }
+                    if ($syncRecord) {
+                        $invoiceUpdateStmt = $pdo->prepare("UPDATE container_system_records
+                            SET status=:status,payload=:payload,updated_at=:updated_at WHERE id=:id");
+                        foreach (hsInvoiceSettlementUpdatesForRecord($syncRecord, $syncRows) as $invoiceUpdate) {
+                            $before = json_encode($invoiceUpdate['invoice']['payload'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                            $after = json_encode($invoiceUpdate['payload'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                            $invoiceId = (int)$invoiceUpdate['invoice']['id'];
+                            $invoiceUpdateStmt->execute([
+                                ':status' => $invoiceUpdate['status'],
+                                ':payload' => $after,
+                                ':updated_at' => $now,
+                                ':id' => $invoiceId,
+                            ]);
+                            hsAudit($pdo, $invoiceId, 'invoice', 'invoice_settlement_sync', $before, $after, $actorId);
+                        }
+                    }
+                }
                 $updated = $pdo->prepare("SELECT * FROM container_system_records WHERE id = :id");
                 $updated->execute([':id' => $id]);
                 $pdo->commit();
@@ -3135,7 +3205,9 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             $id = (int)$pdo->lastInsertId();
             $reference = hsReference($kind, $payload, $id);
             $pdo->prepare("UPDATE container_system_records SET reference = :reference WHERE id = :id")->execute([':reference' => $reference, ':id' => $id]);
-            hsAudit($pdo, $id, $kind, 'create', null, json_encode($payload, JSON_UNESCAPED_UNICODE), $actorId);
+            if ($kind !== 'container_assignment') {
+                hsAudit($pdo, $id, $kind, 'create', null, json_encode($payload, JSON_UNESCAPED_UNICODE), $actorId);
+            }
             if ($kind === 'container_movement') hsSyncMovement($pdo, $payload, $actorId);
             if ($kind === 'container_assignment') {
                 $records = hsFindRecords($pdo);
@@ -3152,7 +3224,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                 $sitePayload = hsPayload($site['payload']);
                 $customerId = (int)($contractPayload['customerRecordId'] ?? 0);
                 $contractNumber = hsContractRecordNumber($contract);
-                $containerCode = trim((string)($assetPayload['assetCode'] ?? $assetPayload['containerCode'] ?? $assetPayload['code'] ?? $asset['reference']));
+                $containerCode = hsAssetCode($assetPayload) ?: trim((string)$asset['reference']);
                 $scheduleDate = substr((string)($payload['startDate'] ?? $payload['scheduleDate'] ?? date('Y-m-d')), 0, 10);
                 $scheduledAt = (string)($payload['scheduledAt'] ?? ($scheduleDate . 'T09:00:00'));
                 $workOrderNumber = 'WO-' . (int)$contract['id'] . '-A' . $id;
@@ -3248,6 +3320,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                 hsAudit($pdo, (int)$asset['id'], (string)$asset['kind'], 'assignment_reserved', (string)$asset['payload'], $assetJson, $actorId);
                 hsAudit($pdo, (int)$contract['id'], 'contract', 'assignment_reserved', (string)$contract['payload'], $contractJson, $actorId);
                 hsAudit($pdo, $workOrderId, 'work_order', 'create', null, $workOrderJson, $actorId);
+                hsAudit($pdo, $id, $kind, 'create', null, $assignmentJson, $actorId);
             }
             if (in_array($kind, ['payment', 'receipt', 'expense', 'deposit', 'bank_deposit', 'bank_fee', 'invoice', 'invoice_return', 'payment_return', 'transfer', 'purchase', 'purchase_return', 'other_revenue'], true)
                 && $status === 'posted') {

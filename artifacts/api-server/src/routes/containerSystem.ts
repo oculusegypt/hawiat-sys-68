@@ -277,7 +277,7 @@ function invoiceReturnAmount(
         invoiceIds[0] === invoice.id &&
         originalAllocations.every(item => Number(item.invoiceId ?? 0) === invoice.id);
       const originalTotal = Number(originalPayload.amount ?? originalPayload.total ?? 0);
-      if (!entirelyAllocatedToInvoice && amount + 0.01 < originalTotal) return 0;
+      if (invoiceIds.length > 0 && !entirelyAllocatedToInvoice && amount + 0.01 < originalTotal) return 0;
     }
     return Math.min(amount, linkedAmount);
   }
@@ -307,6 +307,40 @@ function invoiceNetPaidAmount(
     .filter(row => row.kind === "payment_return" && row.status === "posted")
     .reduce((sum, row) => sum + invoiceReturnAmount(row, invoice, all), 0);
   return Math.max(gross - returned, 0);
+}
+
+function invoiceSettlementUpdatesForRecord(
+  record: typeof containerSystemRecordsTable.$inferSelect,
+  all: typeof containerSystemRecordsTable.$inferSelect[],
+) {
+  if (!["payment", "receipt", "payment_return"].includes(record.kind)) return [];
+  const linkedRecord = { ...record, status: "posted" };
+  return all.flatMap(invoice => {
+    if (invoice.kind !== "invoice" || invoice.status === "archived") return [];
+    const linkedAmount = record.kind === "payment_return"
+      ? invoiceReturnAmount(linkedRecord, invoice, all)
+      : invoiceCollectionAmount(linkedRecord, invoice, all);
+    if (linkedAmount <= 0.01) return [];
+
+    const payload = parsePayload(invoice.payload);
+    const total = Number(payload.total ?? payload.amount ?? 0);
+    if (!Number.isFinite(total) || total <= 0.01) return [];
+    const paid = invoiceNetPaidAmount(invoice, all);
+    const remaining = Math.max(total - paid, 0);
+    const status = remaining <= 0.01 ? "paid" : paid > 0.01 ? "partially_paid" : "due";
+    if (
+      invoice.status === status &&
+      Math.abs(Number(payload.paid ?? 0) - paid) <= 0.01 &&
+      Math.abs(Number(payload.remaining ?? total) - remaining) <= 0.01 &&
+      String(payload.invoiceStatus ?? "") === status
+    ) return [];
+
+    return [{
+      invoice,
+      status,
+      payload: { ...payload, paid, remaining, invoiceStatus: status },
+    }];
+  });
 }
 
 const contractTermsFields = [
@@ -847,7 +881,11 @@ function movementStatus(movementType: string) {
 }
 
 function assetCodeOf(payload: Record<string, unknown>) {
-  return String(payload.assetCode ?? payload.code ?? payload.reference ?? "").trim();
+  for (const field of ["assetCode", "containerCode", "code", "reference"]) {
+    const code = String(payload[field] ?? "").trim();
+    if (code) return code;
+  }
+  return "";
 }
 
 function canonicalAssetStatus(value: unknown, fallback: string) {
@@ -3096,7 +3134,7 @@ router.post("/admin/container-system/records", async (req, res) => {
     payload.assignmentStatus = "reserved";
     payload.contractNumber = contractPayload.contractNumber ?? contract.reference;
     payload.customerRecordId = contractPayload.customerRecordId ?? sitePayload.customerRecordId;
-    payload.containerCode = assetCodeOf(parsePayload(asset.payload));
+    payload.containerCode = assetCodeOf({ ...parsePayload(asset.payload), reference: asset.reference });
   }
   if (kind === "invoice") Object.assign(payload, normalizeInvoicePayload(payload));
   const documentNumberField = kind === "contract" ? "contractNumber" : kind === "invoice" ? "invoiceNumber" : kind === "receipt" ? "receiptNumber" : null;
@@ -3230,7 +3268,7 @@ router.post("/admin/container-system/records", async (req, res) => {
           contractRecordId,
           contractNumber,
           containerRecordId: assetId,
-          containerCode: assetCodeOf(parsePayload(asset.payload)),
+          containerCode: assetCodeOf({ ...parsePayload(asset.payload), reference: asset.reference }),
           containerTypeId: parsePayload(asset.payload).containerTypeId ?? null,
           siteRecordId: Number(payload.siteRecordId),
           siteName: sitePayload.siteName ?? sitePayload.name ?? "",
@@ -3681,6 +3719,35 @@ router.patch("/admin/container-system/records/:id", async (req, res) => {
           }
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : "تعذر ترحيل الحركة إلى النواة المالية");
+      }
+    }
+    if (
+      ["payment", "receipt", "payment_return"].includes(current.kind) &&
+      current.status !== nextStatus &&
+      (current.status === "posted" || nextStatus === "posted")
+    ) {
+      const rowsAfterUpdate = tx.select().from(containerSystemRecordsTable).all();
+      const updatedRecord = rowsAfterUpdate.find(record => record.id === id);
+      if (updatedRecord) {
+        for (const invoiceUpdate of invoiceSettlementUpdatesForRecord(updatedRecord, rowsAfterUpdate)) {
+          const invoicePayload = JSON.stringify(invoiceUpdate.payload);
+          const beforePayload = invoiceUpdate.invoice.payload;
+          const syncedInvoice = tx.update(containerSystemRecordsTable).set({
+            status: invoiceUpdate.status,
+            payload: invoicePayload,
+            updatedAt: new Date().toISOString(),
+          }).where(eq(containerSystemRecordsTable.id, invoiceUpdate.invoice.id)).returning().get();
+          if (syncedInvoice) {
+            tx.insert(containerSystemAuditTable).values({
+              recordId: syncedInvoice.id,
+              kind: "invoice",
+              action: "invoice_settlement_sync",
+              beforePayload,
+              afterPayload: syncedInvoice.payload,
+              actorId: adminReq.adminId,
+            }).run();
+          }
+        }
       }
     }
     return { updated: next };

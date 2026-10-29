@@ -83,12 +83,22 @@ $containerId = $insertRecord('container_asset', 'available', 'TEST-ONLY-ASSET-1'
     'status' => 'available',
     'location' => 'TEST ONLY — warehouse',
 ]);
+lifecycleExpectSame('TEST-ONLY-LEGACY-CODE', hsAssetCode([
+    'assetCode' => '',
+    'containerCode' => 'TEST-ONLY-LEGACY-CODE',
+    'code' => 'TEST-ONLY-OTHER-CODE',
+]), 'asset-code resolution must skip blank fields and support legacy containerCode');
+lifecycleExpectSame('TEST-ONLY-SECONDARY-CODE', hsAssetCode([
+    'assetCode' => ' ',
+    'code' => 'TEST-ONLY-SECONDARY-CODE',
+]), 'asset-code resolution must fall back to a nonblank code');
 $assetRow = $pdo->query("SELECT * FROM container_system_records WHERE id = {$containerId}")->fetch(PDO::FETCH_ASSOC);
 $assetStatusIssue = hsProtectedRecordMutationIssue($assetRow, ['status' => 'rented']);
 lifecycleExpectSame(409, (int)($assetStatusIssue['status'] ?? 0),
     'asset status must not be changed without an operational movement');
 $contractId = $insertRecord('contract', 'active', 'TEST-ONLY-CONTRACT-1', [
     'contractNumber' => 'TEST-ONLY-CONTRACT-1',
+    'customerRecordId' => $identifierCustomerId,
     'containerRecordId' => $containerId,
     'containerCode' => 'TEST-ONLY-ASSET-1',
     'startDate' => '2026-10-01',
@@ -96,6 +106,30 @@ $contractId = $insertRecord('contract', 'active', 'TEST-ONLY-CONTRACT-1', [
     'total' => 100,
     'location' => 'TEST ONLY — customer site',
 ]);
+$siteId = $insertRecord('customer_site', 'active', 'TEST-ONLY-SITE-1', [
+    'customerRecordId' => $identifierCustomerId,
+    'name' => 'TEST ONLY — assignment site',
+    'address' => 'TEST ONLY — assignment location',
+]);
+lifecycleExpectSame(null, hsContainerAssignmentError($pdo, [
+    'contractRecordId' => $contractId,
+    'containerRecordId' => $containerId,
+    'siteRecordId' => $siteId,
+]), 'PHP must accept an assignment when contract, asset, and site are eligible');
+$foreignSiteId = $insertRecord('customer_site', 'active', 'TEST-ONLY-FOREIGN-SITE-1', [
+    'customerRecordId' => $identifierCustomerId + 100,
+    'name' => 'TEST ONLY — foreign site',
+    'address' => 'TEST ONLY — foreign location',
+]);
+lifecycleExpectSame('موقع التخصيص لا يتبع عميل العقد', hsContainerAssignmentError($pdo, [
+    'contractRecordId' => $contractId,
+    'containerRecordId' => $containerId,
+    'siteRecordId' => $foreignSiteId,
+]), 'PHP must reject an assignment site belonging to a different customer');
+lifecycleExpectSame('العقد وأصل الحاوية وموقع العميل مطلوبة للتخصيص', hsContainerAssignmentError($pdo, [
+    'contractRecordId' => $contractId,
+    'containerRecordId' => $containerId,
+]), 'PHP must require all record IDs for an assignment');
 lifecycleExpectSame(true, hsContractHasOverlappingDates($pdo, [
     'containerCode' => 'TEST-ONLY-ASSET-1',
     'startDate' => '2026-10-15',
@@ -138,6 +172,11 @@ $assignmentId = $insertRecord('container_assignment', 'active', 'TEST-ONLY-ASSIG
 ]);
 lifecycleExpectSame(true, hsHasActiveContainerAssignment($pdo, $containerId),
     'an active assignment must block another container contract');
+lifecycleExpectSame('الحاوية مرتبطة بتخصيص نشط بالفعل', hsContainerAssignmentError($pdo, [
+    'contractRecordId' => $contractId,
+    'containerRecordId' => $containerId,
+    'siteRecordId' => $siteId,
+]), 'PHP assignment validation must reject an asset with an existing active assignment');
 $manager = ['id' => 1, 'role' => 'manager'];
 
 lifecycleExpectFailure(
@@ -194,17 +233,18 @@ lifecycleExpectFailure(
     422,
     'a contract with an outstanding balance must not close',
 );
-$paymentId = $insertRecord('payment', 'posted', 'TEST-ONLY-PAYMENT-1', [
-    'contractRecordId' => $contractId,
-    'contractNumber' => 'TEST-ONLY-CONTRACT-1',
-    'amount' => 100,
-    'date' => date('Y-m-d'),
-]);
 $invoiceId = $insertRecord('invoice', 'draft', 'TEST-ONLY-INVOICE-1', [
     'contractRecordId' => $contractId,
     'contractNumber' => 'TEST-ONLY-CONTRACT-1',
     'total' => 100,
     'remaining' => 100,
+]);
+$paymentId = $insertRecord('payment', 'posted', 'TEST-ONLY-PAYMENT-1', [
+    'contractRecordId' => $contractId,
+    'contractNumber' => 'TEST-ONLY-CONTRACT-1',
+    'invoiceRecordId' => $invoiceId,
+    'amount' => 100,
+    'date' => date('Y-m-d'),
 ]);
 lifecycleExpectFailure(
     static fn() => hsUpdateContainerContractLifecycle($pdo, $contractId, 'close', '', 1, $manager),
