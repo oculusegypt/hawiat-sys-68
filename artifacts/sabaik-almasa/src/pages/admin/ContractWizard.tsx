@@ -290,7 +290,8 @@ function MapPicker({ initialCoordinates, onSelect }: { initialCoordinates: strin
     if (!mapElement.current || mapRef.current) return
     const [initialLat, initialLng] = initialCoordinates.split(",").map(Number)
     const hasInitial = Number.isFinite(initialLat) && Number.isFinite(initialLng)
-    const map = L.map(mapElement.current).setView(hasInitial ? [initialLat, initialLng] : [24.7136, 46.6753], hasInitial ? 16 : 11)
+    // This picker can unmount while zooming; Leaflet 1.9 retains its zoom timer.
+    const map = L.map(mapElement.current, { zoomAnimation: false }).setView(hasInitial ? [initialLat, initialLng] : [24.7136, 46.6753], hasInitial ? 16 : 11)
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: "&copy; OpenStreetMap contributors",
       maxZoom: 19,

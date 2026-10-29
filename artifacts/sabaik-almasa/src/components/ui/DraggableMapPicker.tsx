@@ -61,12 +61,15 @@ export function DraggableMapPicker({ initialLat, initialLng, onConfirm, onSelect
 
   useEffect(() => {
     if (!mapDiv.current || mapRef.current) return
+    let disposed = false
 
     // استدعاء Leaflet ديناميكياً لتفادي SSR أو مشاكل التهيئة المزدوجة
     import("leaflet").then((L) => {
-      if (!mapDiv.current || mapRef.current) return
+      if (disposed || !mapDiv.current || mapRef.current) return
 
       const map = L.map(mapDiv.current, {
+        // Leaflet 1.9 leaves a zoom completion timer alive after remove().
+        zoomAnimation: false,
         center: [initialLat, initialLng],
         zoom: 18,
         zoomControl: true,
@@ -104,6 +107,7 @@ export function DraggableMapPicker({ initialLat, initialLng, onConfirm, onSelect
     })
 
     return () => {
+      disposed = true
       if (timerRef.current) clearTimeout(timerRef.current)
       mapRef.current?.remove()
       mapRef.current = null

@@ -415,7 +415,8 @@ export default function ContainerMap() {
 
   useEffect(() => {
     if (!mapElement.current || mapRef.current) return
-    const map = L.map(mapElement.current, { zoomControl: false, attributionControl: true }).setView(
+    // Avoid Leaflet's delayed zoom callback accessing panes after navigation.
+    const map = L.map(mapElement.current, { zoomControl: false, attributionControl: true, zoomAnimation: false }).setView(
       RIYADH_CENTER,
       11,
     )
@@ -426,9 +427,10 @@ export default function ContainerMap() {
     }).addTo(map)
     markersRef.current = L.layerGroup().addTo(map)
     mapRef.current = map
-    window.setTimeout(() => map.invalidateSize(), 50)
+    const resizeTimer = window.setTimeout(() => map.invalidateSize(), 50)
 
     return () => {
+      window.clearTimeout(resizeTimer)
       map.remove()
       mapRef.current = null
       markersRef.current = null
