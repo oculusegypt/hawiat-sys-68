@@ -416,6 +416,15 @@ function formatRecord(
   return { ...row, payload };
 }
 
+function formatServiceRequest(row: typeof serviceRequestsTable.$inferSelect) {
+  const location = splitLocationText(row.location);
+  return {
+    ...row,
+    location: location.address || (location.coordinates ? "الموقع المحدد" : ""),
+    locationCoordinates: location.coordinates || null,
+  };
+}
+
 function canManage(req: AdminRequest, kind: string): boolean {
   if (req.adminRole === "admin" || req.adminRole === "manager") return true;
   const permissions = req.adminPermissions as string[];
@@ -1466,7 +1475,7 @@ async function existingContractWorkflowResponse(contract: typeof containerSystem
     assignment: related("container_assignment") ? formatRecord(related("container_assignment")!) : null,
     appointment: related("appointment") ? formatRecord(related("appointment")!) : null,
     workOrder: workOrder ? formatRecord(workOrder) : null,
-    serviceRequest: serviceRequest ?? null,
+    serviceRequest: serviceRequest ? formatServiceRequest(serviceRequest) : null,
     invoice: invoice ? formatRecord(invoice) : null,
     rentalLine: rentalLine ? formatRecord(rentalLine) : null,
     idempotent: true,
@@ -2003,7 +2012,7 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
       }
       return { contract: finalizedContract, assignment, appointment, workOrder, serviceRequest, invoice, rentalLine };
     });
-     return res.status(201).json({ contract: formatRecord(result.contract), assignment: result.assignment ? formatRecord(result.assignment) : null, appointment: result.appointment ? formatRecord(result.appointment) : null, workOrder: result.workOrder ? formatRecord(result.workOrder) : null, serviceRequest: result.serviceRequest ?? null, invoice: result.invoice ? formatRecord(result.invoice) : null, rentalLine: result.rentalLine ? formatRecord(result.rentalLine) : null, idempotent: false });
+     return res.status(201).json({ contract: formatRecord(result.contract), assignment: result.assignment ? formatRecord(result.assignment) : null, appointment: result.appointment ? formatRecord(result.appointment) : null, workOrder: result.workOrder ? formatRecord(result.workOrder) : null, serviceRequest: result.serviceRequest ? formatServiceRequest(result.serviceRequest) : null, invoice: result.invoice ? formatRecord(result.invoice) : null, rentalLine: result.rentalLine ? formatRecord(result.rentalLine) : null, idempotent: false });
   } catch (error) {
     if (error instanceof Error && error.message === "الحاوية مرتبطة بعقد آخر خلال نفس الفترة") {
       return res.status(409).json({ error: error.message });

@@ -29,6 +29,15 @@ lifecycleExpectSame(true, in_array('attribution_gclid', $serviceRequestColumns, 
     'service request preparation must include attribution columns');
 hsEnsureSchema($pdo);
 
+$formattedServiceRequest = hsServiceRequestForResponse([
+    'id' => 1,
+    'location' => "حي الياسمين، الرياض\nإحداثيات GPS: 24.823456,46.623456",
+]);
+lifecycleExpectSame('حي الياسمين، الرياض', $formattedServiceRequest['location'],
+    'contract workflow responses must not expose GPS markers in the displayed address');
+lifecycleExpectSame('24.823456,46.623456', $formattedServiceRequest['locationCoordinates'],
+    'contract workflow responses must preserve coordinates separately for map use');
+
 $insertRecord = static function (string $kind, string $status, string $reference, array $payload) use ($pdo): int {
     $now = date('c');
     $stmt = $pdo->prepare("INSERT INTO container_system_records

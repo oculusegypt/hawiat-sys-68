@@ -34,11 +34,23 @@ import {
 
 // ─── Status config ─────────────────────────────────────────────────────────────
 const STATUS_CONFIG = {
+  [ServiceRequestStatus.new]: {
+    label: "جديد",
+    badge:  "bg-blue-100 text-blue-700 border-blue-200",
+    row:    "bg-blue-50/40 hover:bg-blue-50/70",
+    left:   "border-r-4 border-blue-400",
+  },
   [ServiceRequestStatus.pending]: {
     label: "جديد",
     badge:  "bg-blue-100 text-blue-700 border-blue-200",
     row:    "bg-blue-50/40 hover:bg-blue-50/70",
     left:   "border-r-4 border-blue-400",
+  },
+  [ServiceRequestStatus.assigned]: {
+    label: "مسند",
+    badge:  "bg-cyan-100 text-cyan-800 border-cyan-200",
+    row:    "bg-cyan-50/40 hover:bg-cyan-50/70",
+    left:   "border-r-4 border-cyan-400",
   },
   [ServiceRequestStatus.in_progress]: {
     label: "قيد التنفيذ",
@@ -63,6 +75,12 @@ const STATUS_CONFIG = {
     badge:  "bg-slate-100 text-slate-700 border-slate-200",
     row:    "bg-slate-50/40 hover:bg-slate-50/70",
     left:   "border-r-4 border-slate-400",
+  },
+  [ServiceRequestStatus.closed]: {
+    label: "مغلق",
+    badge:  "bg-gray-100 text-gray-600 border-gray-200",
+    row:    "bg-gray-50/40 hover:bg-gray-50/70",
+    left:   "border-r-4 border-gray-400",
   },
 } as const
 

@@ -432,7 +432,7 @@ function OrderDetailsDialog({
                 {order.driverLocationLat && order.driverLocationLng && (
                   <Info
                     label="موقع التنفيذ"
-                    value={`${order.driverLocationLat}, ${order.driverLocationLng}`}
+                    value="تم تسجيل موقع التنفيذ"
                   />
                 )}
               </div>

@@ -180,9 +180,16 @@ function hsSplitLocationText($value, $explicitCoordinates = null): array {
     $coordinates = $lat !== null && $lng !== null && abs($lat) <= 90 && abs($lng) <= 180
         ? rtrim(rtrim(number_format($lat, 8, '.', ''), '0'), '.') . ',' . rtrim(rtrim(number_format($lng, 8, '.', ''), '0'), '.')
         : '';
-    $address = preg_match($markerPattern, $raw)
-        ? trim((string)preg_replace('/\s*\(?\s*(?:إحداثيات\s*GPS|GPS)\s*[:：]\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\)?/iu', '', $raw), " \t\n\r\0\x0B,،()")
-        : (preg_match($coordinatePattern, $raw) ? '' : $raw);
+    if (preg_match($markerPattern, $raw)) {
+        $withoutMarker = (string)preg_replace(
+            '/\s*\(?\s*(?:إحداثيات\s*GPS|GPS)\s*[:：]\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\)?/iu',
+            '',
+            $raw,
+        );
+        $address = (string)preg_replace('/^[\s,،()]+|[\s,،()]+$/u', '', $withoutMarker);
+    } else {
+        $address = preg_match($coordinatePattern, $raw) ? '' : $raw;
+    }
     return ['address' => $address, 'coordinates' => $coordinates];
 }
 
@@ -235,6 +242,16 @@ function hsRecord(array $row): array {
         if (!empty($row['payload'][$photoField])) $row['payload'][$photoField] = hsRefreshPrivateUploadUrl($row['payload'][$photoField]);
     }
     unset($row['created_by'], $row['created_at'], $row['updated_at']);
+    return $row;
+}
+
+function hsServiceRequestForResponse(?array $row): ?array {
+    if ($row === null) return null;
+    $location = hsSplitLocationText($row['location'] ?? '');
+    $row['location'] = $location['address'] !== ''
+        ? $location['address']
+        : ($location['coordinates'] !== '' ? 'الموقع المحدد' : '');
+    $row['locationCoordinates'] = $location['coordinates'] !== '' ? $location['coordinates'] : null;
     return $row;
 }
 
@@ -1884,7 +1901,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                     'assignment' => ($row = $related('container_assignment')) ? hsRecord($row) : null,
                     'appointment' => ($row = $related('appointment')) ? hsRecord($row) : null,
                     'workOrder' => ($row = $related('work_order')) ? hsRecord($row) : null,
-                    'serviceRequest' => $serviceRequest,
+                    'serviceRequest' => hsServiceRequestForResponse($serviceRequest),
                     'idempotent' => true,
                 ]);
             }
@@ -1914,7 +1931,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                         'assignment' => ($row = $related('container_assignment')) ? hsRecord($row) : null,
                         'appointment' => ($row = $related('appointment')) ? hsRecord($row) : null,
                         'workOrder' => ($row = $related('work_order')) ? hsRecord($row) : null,
-                        'serviceRequest' => $serviceStmt->fetch(PDO::FETCH_ASSOC) ?: null,
+                        'serviceRequest' => hsServiceRequestForResponse($serviceStmt->fetch(PDO::FETCH_ASSOC) ?: null),
                         'idempotent' => true,
                     ]);
                 }
