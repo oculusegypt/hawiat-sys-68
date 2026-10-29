@@ -216,7 +216,7 @@ function hsRefreshPrivateUploadUrl($value): ?string {
     $raw = trim((string)($value ?? ''));
     if ($raw === '') return null;
     $path = parse_url($raw, PHP_URL_PATH);
-    if (!is_string($path) || !preg_match('#^/api/private-uploads/([^/?#]+)$#', $path, $match)) return $raw;
+    if (!is_string($path) || !preg_match('~^/api/private-uploads/([^/?#]+)$~', $path, $match)) return $raw;
     $filename = rawurldecode($match[1]);
     $secret = trim((string)getenv('SESSION_SECRET'));
     if ($secret === '' || !preg_match('/^[A-Za-z0-9._-]+$/', $filename)) return $raw;
@@ -2091,7 +2091,8 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                 'legacyRequestId' => $existingServiceRequestId > 0 ? $existingServiceRequestId : null,
                 'serviceType' => (string)($service['serviceType'] ?? ($operationType === 'PICKUP_CONTAINER' ? 'استرجاع حاوية' : 'تسليم حاوية')),
                 'containerCode' => (string)($contract['containerCode'] ?? hsAssetCode($assetPayload)),
-                'location' => (string)($service['location'] ?? $contract['location'] ?? 'يحدد لاحقًا'),
+                'location' => hsSplitLocationText((string)($service['location'] ?? $contract['location'] ?? 'يحدد لاحقًا'), $service['locationCoordinates'] ?? $contract['locationCoordinates'] ?? null)['address'] ?: 'الموقع المحدد',
+                'locationCoordinates' => (string)($service['locationCoordinates'] ?? $contract['locationCoordinates'] ?? hsSplitLocationText((string)($service['location'] ?? $contract['location'] ?? ''))['coordinates']),
                 'notes' => (string)($service['notes'] ?? $contract['notes'] ?? ''),
                 'appointmentRecordId' => null,
                 'appointmentType' => (string)($appointment['appointmentType'] ?? 'scheduled'),
@@ -2178,11 +2179,12 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                             $invoicePayloadForPosting['lifecycleStatus'] = 'due';
                             $invoicePayloadForPosting['paymentStatus'] = (float)($invoicePayloadForPosting['paid'] ?? 0) > 0 ? 'partially_paid' : 'unpaid';
                             $invoicePayloadForPosting['amount'] = (float)($invoicePayloadForPosting['amount'] ?? $invoiceTotalForPosting);
+                            $invoicePayloadForPosting['operationKey'] = trim((string)($invoicePayloadForPosting['operationKey'] ?? '')) ?: 'contract-invoice-' . (int)$invoiceRow['id'];
                             $pdo->prepare("UPDATE container_system_records SET status='due',payload=:payload,updated_at=:updated_at WHERE id=:id")
                                 ->execute([':payload' => json_encode($invoicePayloadForPosting, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':updated_at' => $now, ':id' => (int)$invoiceRow['id']]);
                             $postingPayload = $invoicePayloadForPosting;
                             $postingPayload['amount'] = $invoiceTotalForPosting;
-                            hsPostFinancialCore($pdo, 'invoice', (int)$invoiceRow['id'], $postingPayload, (string)($invoiceRow['reference'] ?? ''), $actorId);
+                            hsPostFinancialCore($pdo, 'invoice', (int)$invoiceRow['id'], $postingPayload, trim((string)($invoiceRow['reference'] ?? '')) ?: (string)($invoicePayloadForPosting['invoiceNumber'] ?? 'INV-' . (int)$invoiceRow['id']), $actorId);
                             $invoiceRow = $find($pdo, (int)$invoiceRow['id']);
                         }
                     }
@@ -2363,11 +2365,13 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             if ($allocation['invoiceId']) {
                 $invoice = null; foreach ($rows as $row) if ($row['kind'] === 'invoice' && (int)$row['id'] === $allocation['invoiceId']) $invoice = $row;
                   if (!$invoice || $invoice['status'] === 'archived' || ((int)($invoice['payload']['contractRecordId'] ?? 0) !== $allocation['contractId'] && (string)($invoice['payload']['contractNumber'] ?? '') !== $number)) hsJson(['error' => 'الفاتورة لا تتبع العقد المحدد'], 422);
-                  if (!in_array($invoice['status'], ['posted', 'due', 'overdue', 'partially_paid'], true)) hsJson(['error' => 'لا يمكن التحصيل على فاتورة غير مرحّلة أو مغلقة'], 422);
+                  $invoiceTotal = (float)($invoice['payload']['total'] ?? $invoice['payload']['amount'] ?? 0);
+                  $canIssueContractInvoice = $invoiceTotal > 0
+                      && !in_array($invoice['status'], ['cancelled', 'rejected', 'archived'], true);
+                  if (!in_array($invoice['status'], ['posted', 'due', 'overdue', 'partially_paid'], true) && !$canIssueContractInvoice) hsJson(['error' => 'لا يمكن التحصيل على فاتورة غير مرحّلة أو مغلقة'], 422);
                   $invoicePosting = $pdo->prepare("SELECT id FROM financial_transactions WHERE source_kind = 'invoice' AND source_id = ? AND status = 'posted' LIMIT 1");
                   $invoicePosting->execute([(int)$invoice['id']]);
-                  if (!$invoicePosting->fetchColumn()) hsJson(['error' => 'الفاتورة لم تُرحّل إلى النواة المالية بعد'], 422);
-                 $invoiceTotal = (float)($invoice['payload']['total'] ?? $invoice['payload']['amount'] ?? 0);
+                  if (!$invoicePosting->fetchColumn() && !$canIssueContractInvoice) hsJson(['error' => 'الفاتورة لم تُرحّل إلى النواة المالية بعد'], 422);
                  $invoicePaid = 0.0;
                  foreach (hsPostedCollections($rows) as $payment) {
                      foreach (($payment['payload']['allocations'] ?? []) as $item) {
@@ -2411,6 +2415,35 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             }
             $pdo->beginTransaction();
         try {
+            foreach ($allocations as $allocation) {
+                $invoiceId = (int)($allocation['invoiceId'] ?? 0);
+                if ($invoiceId <= 0) continue;
+                $posted = $pdo->prepare("SELECT id FROM financial_transactions WHERE source_kind='invoice' AND source_id=? AND status='posted' LIMIT 1");
+                $posted->execute([$invoiceId]);
+                if ($posted->fetchColumn()) continue;
+                $invoiceRow = null;
+                foreach ($rows as $candidate) {
+                    if ($candidate['kind'] === 'invoice' && (int)$candidate['id'] === $invoiceId) {
+                        $invoiceRow = $candidate;
+                        break;
+                    }
+                }
+                if (!$invoiceRow) {
+                    throw new RuntimeException('الفاتورة لم تُرحّل إلى النواة المالية بعد');
+                }
+                $invoicePayload = $invoiceRow['payload'];
+                $invoiceTotal = (float)($invoicePayload['total'] ?? $invoicePayload['amount'] ?? 0);
+                if ($invoiceTotal <= 0) throw new RuntimeException('لا يمكن ترحيل فاتورة بقيمة غير موجبة');
+                $invoicePayload['invoiceStatus'] = 'due';
+                $invoicePayload['lifecycleStatus'] = 'due';
+                $invoicePayload['paymentStatus'] = (float)($invoicePayload['paid'] ?? 0) > 0 ? 'partially_paid' : 'unpaid';
+                $invoicePayload['operationKey'] = trim((string)($invoicePayload['operationKey'] ?? '')) ?: 'contract-invoice-' . $invoiceId;
+                $pdo->prepare("UPDATE container_system_records SET status='due',payload=:payload,updated_at=:updated_at WHERE id=:id")
+                    ->execute([':payload' => json_encode($invoicePayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':updated_at' => $now, ':id' => $invoiceId]);
+                $postingPayload = $invoicePayload;
+                $postingPayload['amount'] = $invoiceTotal;
+                hsPostFinancialCore($pdo, 'invoice', $invoiceId, $postingPayload, trim((string)($invoiceRow['reference'] ?? '')) ?: (string)($invoicePayload['invoiceNumber'] ?? 'INV-' . $invoiceId), $actorId);
+            }
             $insert = $pdo->prepare("INSERT INTO container_system_records (kind,status,reference,payload,operation_key,created_by,created_at,updated_at) VALUES ('payment','posted',:reference,:payload,:operation_key,:created_by,:created_at,:updated_at)");
             $insert->execute([':reference' => 'PAY-' . time(), ':payload' => json_encode($paymentPayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':operation_key' => $operationKey, ':created_by' => $actorId, ':created_at' => $now, ':updated_at' => $now]);
             $paymentId = (int)$pdo->lastInsertId();
@@ -2441,7 +2474,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                         $invoicePaid += $allocations[$index]['amount'];
                         $invoiceRemaining = max($invoiceTotal - $invoicePaid, 0);
                         $dueDate = (string)($invoicePayload['dueDate'] ?? $invoicePayload['date'] ?? '');
-                        $invoiceStatus = $invoiceRemaining <= 0.01 ? 'paid' : ($dueDate !== '' && strtotime($dueDate) < time() ? 'overdue' : ($invoicePaid > 0 ? 'partially_paid' : 'due'));
+                        $invoiceStatus = $invoiceRemaining <= 0.01 ? 'paid' : ($invoicePaid > 0 ? 'partially_paid' : 'due');
                         $invoicePayload['paid'] = $invoicePaid;
                         $invoicePayload['remaining'] = $invoiceRemaining;
                         $invoicePayload['invoiceStatus'] = $invoiceStatus;

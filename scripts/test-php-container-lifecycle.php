@@ -285,6 +285,8 @@ $appointmentId = $insertRecord('appointment', 'scheduled', 'TEST-ONLY-LEGACY-APP
 ]);
 $unknownAppointmentId = $insertRecord('appointment', 'scheduled', 'TEST-ONLY-UNKNOWN-APPOINTMENT', [
     'appointmentType' => 'scheduled',
+    'contractRecordId' => $contractId,
+    'containerRecordId' => $containerId,
     'scheduledAt' => '2026-11-01T10:00:00.000Z',
 ]);
 $pdo->prepare("INSERT INTO service_requests

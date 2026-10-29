@@ -1,6 +1,7 @@
 import { Input } from "@/components/ui/input"
 import { DraggableMapPicker } from "@/components/ui/DraggableMapPicker"
 import { useState, type ReactNode } from "react"
+import { cleanLocationText, parseLocationCoordinates } from "@/lib/location"
 import {
   AlertCircle,
   Building2,
@@ -21,6 +22,7 @@ export interface SafetyComplianceFormState {
   licenseNumber: string
   facilityType: string
   siteAddress: string
+  siteAddressCoordinates?: string
   floors: string
   approximateArea: string
   existingSystems: string[]
@@ -324,6 +326,8 @@ export function SafetyComplianceDetails({
   const kind = getServiceKind(serviceType)
   const presentation = getServicePresentation(serviceType)
   const ServiceIcon = presentation.icon
+  const siteCoordinates = parseLocationCoordinates(value?.siteAddressCoordinates) ??
+    parseLocationCoordinates(value?.siteAddress)
 
   const update = <K extends keyof SafetyComplianceFormState>(
     field: K,
@@ -448,8 +452,8 @@ export function SafetyComplianceDetails({
                 id="safety-site-address"
                 label="الحي أو عنوان الموقع"
                 optional
-                value={value.siteAddress}
-                onChange={(next) => update("siteAddress", next)}
+                value={cleanLocationText(value.siteAddress)}
+                onChange={(next) => onChange({ ...(value || {}), siteAddress: next, siteAddressCoordinates: "" })}
                 placeholder="مثال: الملقا، الرياض"
               />
               <div className="sm:col-span-3">
@@ -459,10 +463,14 @@ export function SafetyComplianceDetails({
                 {mapOpen && (
                   <div className="mt-2 rounded-xl border border-[#d7e7e6] bg-[#f7fbfb] p-2">
                     <DraggableMapPicker
-                      initialLat={24.7136}
-                      initialLng={46.6753}
+                      initialLat={siteCoordinates?.lat ?? 24.7136}
+                      initialLng={siteCoordinates?.lng ?? 46.6753}
                       onConfirm={(address, lat, lng) => {
-                        if (address) update("siteAddress", `${address} (إحداثيات GPS: ${lat.toFixed(6)}, ${lng.toFixed(6)})`)
+                        onChange({
+                          ...(value || {}),
+                          siteAddress: cleanLocationText(address) || "الموقع المحدد",
+                          siteAddressCoordinates: `${lat.toFixed(6)},${lng.toFixed(6)}`,
+                        })
                         setMapOpen(false)
                       }}
                     />

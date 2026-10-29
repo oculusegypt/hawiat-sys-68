@@ -854,7 +854,7 @@ export function DispatchCalendar({ records, onOpenAppointment }: DispatchCalenda
                   {mode === "week" && <div className="mb-2 flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-cyan-600" /><h3 className="text-sm font-black text-slate-800">{displayDate(group.date)}</h3><span className="text-[11px] text-slate-400">{group.items.length} مهمة</span></div>}
                   <div className="space-y-3">
                     {group.items.map(order => {
-                      const status = dispatchStatus[order.driverStatus] ?? { label: order.status, className: "border-slate-200 bg-slate-50 text-slate-700" }
+                      const status = dispatchStatus[order.driverStatus ?? "unassigned"] ?? { label: order.status, className: "border-slate-200 bg-slate-50 text-slate-700" }
                       const scheduledDate = order.scheduledAt ? new Date(order.scheduledAt) : null
                       const timeLabel = order.appointmentTime || (scheduledDate && Number.isFinite(scheduledDate.getTime())
                         ? scheduledDate.toLocaleTimeString("ar-SA", { hour: "2-digit", minute: "2-digit" })

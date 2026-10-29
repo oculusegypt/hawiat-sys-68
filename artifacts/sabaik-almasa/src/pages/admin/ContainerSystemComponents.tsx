@@ -641,6 +641,14 @@ export const STATUS_OPTIONS = [
   ["delinquent", "مديونية"], ["approved", "معتمد"], ["rejected", "مرفوض"],
 ] as const
 
+const INVOICE_STATUS_OPTIONS = [
+  ["draft", "مسودة"],
+  ["due", "مستحقة"],
+  ["partially_paid", "مدفوعة جزئيًا"],
+  ["paid", "مدفوعة بالكامل"],
+  ["cancelled", "ملغاة"],
+] as const
+
 const CONTAINER_STATUS_OPTIONS = [
   { value: "available", label: "متاحة — جاهزة للتأجير" },
   { value: "reserved", label: "محجوزة — بانتظار التسليم" },
@@ -1162,6 +1170,7 @@ export function RecordDialog({
   const categorySizes = records.filter(item => item.kind === "category_size" && item.status !== "archived")
   const isCustomerPayment = kind === "payment"
   const isInvoice = kind === "invoice"
+  const displayedStatus = isInvoice && status === "overdue" ? "due" : status
   const isFinancialRecord = ["receipt", "payment", "expense", "deposit", "bank_deposit", "invoice", "invoice_return", "payment_return", "transfer", "purchase", "purchase_return", "commission", "salary_advance", "salary_payment"].includes(kind)
   const isCustomerLinkedFinancial = ["invoice", "receipt", "payment", "invoice_return", "payment_return", "ledger_entry"].includes(kind)
   const customers = [...records.filter(item => item.kind === "customer" && item.status !== "archived"), ...createdCustomers]
@@ -1859,12 +1868,16 @@ export function RecordDialog({
                </div>
              )}
              {kind !== "container" && <div className={`${kind === "contract" ? "" : "sm:col-span-2"} ${isCustomerPayment ? "order-7" : ""}`}>
-              <Label htmlFor="record-status" className="mb-1.5 block text-xs font-bold text-slate-600">حالة السجل</Label>
-              <select id="record-status" value={status} onChange={event => setStatus(event.target.value)} className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-cyan-700" data-testid="select-record-status">
+              <Label htmlFor="record-status" className="mb-1.5 block text-xs font-bold text-slate-600">{isInvoice ? "حالة الفاتورة" : "حالة السجل"}</Label>
+              <select id="record-status" value={displayedStatus} disabled={isInvoice} onChange={event => setStatus(event.target.value)} className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-cyan-700 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-700" data-testid="select-record-status">
                  {isCustomerPayment
                    ? CUSTOMER_PAYMENT_STATUS_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)
-                   : STATUS_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                   : (isInvoice ? INVOICE_STATUS_OPTIONS : STATUS_OPTIONS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                 {isInvoice && !INVOICE_STATUS_OPTIONS.some(([value]) => value === displayedStatus) && (
+                   <option value={displayedStatus}>{STATUS_OPTIONS.find(([value]) => value === displayedStatus)?.[1] ?? displayedStatus}</option>
+                 )}
               </select>
+              {isInvoice && <p className="mt-1 text-[11px] text-slate-500">تتغير الحالة تلقائيًا عند إصدار الفاتورة وتسجيل الدفعات.</p>}
              </div>}
           </div>
           </div>

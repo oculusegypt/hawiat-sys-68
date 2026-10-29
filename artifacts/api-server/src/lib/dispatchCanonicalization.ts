@@ -150,10 +150,6 @@ export function ensureCanonicalDispatchTasks(): void {
     const appointments = allRows.filter((row) => row.kind === "appointment" && row.status !== "archived");
 
     for (const request of requests) {
-      // A service request is intake only. Dispatch work starts after a
-      // contract and a container have both been linked by the contract flow.
-      if (!numericId(request.contractRecordId) || !numericId(request.containerRecordId)) continue;
-      if (/(?:عقد|عقود)\s*(?:ال)?(?:نظافة|تنظيف)/u.test(String(request.serviceType ?? "").trim())) continue;
       const existingLinks = workOrders.filter((row) =>
         row.status !== "archived" &&
         numericId(parsePayload(row.payload).legacyRequestId) === request.id,
@@ -185,6 +181,10 @@ export function ensureCanonicalDispatchTasks(): void {
         continue;
       }
 
+      // A service request is intake only. Dispatch work starts after a
+      // contract and a container have both been linked by the contract flow.
+      if (!numericId(request.contractRecordId) || !numericId(request.containerRecordId)) continue;
+      if (/(?:عقد|عقود)\s*(?:ال)?(?:نظافة|تنظيف)/u.test(String(request.serviceType ?? "").trim())) continue;
       const candidates = workOrders.filter((row) => sameReferencesAndSchedule(parsePayload(row.payload), request));
       const operation = requestOperation(request);
       const candidatePayload = candidates.length === 1 ? parsePayload(candidates[0].payload) : {};

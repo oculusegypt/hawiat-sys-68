@@ -339,7 +339,7 @@ export default function RequestPrint() {
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 10 }}>
             <div className="field" style={{ flex: 1 }}>
               <div className="field-label">العنوان</div>
-              <div className="field-value">{req.location}</div>
+              <div className="field-value">{displayLocation}</div>
               {gps && (
                 <div style={{ fontFamily: "monospace", fontSize: 11, color: "#9ca3af", marginTop: 2, direction: "ltr", textAlign: "right" }}>
                   {gps.lat.toFixed(6)}, {gps.lng.toFixed(6)}

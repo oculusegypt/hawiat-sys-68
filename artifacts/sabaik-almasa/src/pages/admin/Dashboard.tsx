@@ -206,7 +206,7 @@ function ChartTooltip({ active, payload, label }: {
 }
 
 function OperationsExceptions() {
-  const workOrdersQuery = useGetAdminWorkOrders({
+  const workOrdersQuery = useGetAdminWorkOrders({}, {
     query: { queryKey: getGetAdminWorkOrdersQueryKey(), staleTime: 30_000 },
   })
   const containerQuery = useGetContainerSystem({

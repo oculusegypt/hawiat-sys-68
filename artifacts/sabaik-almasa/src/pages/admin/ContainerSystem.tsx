@@ -2040,7 +2040,14 @@ function RecordDetails({ record, allRecords, serviceRequests = [], open, onOpenC
     ((item as ServiceRequest & { containerRecordId?: number | null; customerRecordId?: number | null }).customerRecordId === record.id && (!customerName || item.clientName === customerName))
   )
   const requestLocation = linkedRequest?.location ?? String(latestContractPayload.location ?? linkedSite?.payload.address ?? linkedSite?.payload.location ?? "")
-  const requestCoordinates = coordinatesFromLocation(requestLocation)
+  const requestCoordinates = coordinatesFromLocation(
+    String(
+      (linkedRequest as ServiceRequest & { locationCoordinates?: string | null } | undefined)?.locationCoordinates ||
+      latestContractPayload.locationCoordinates ||
+      linkedSite?.payload.locationCoordinates ||
+      requestLocation,
+    ),
+  )
   const proofPhotoUrl = String(
     detailPayload.driverProofPhotoUrl ??
       detailPayload.proofPhotoUrl ??

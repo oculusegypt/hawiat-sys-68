@@ -26,6 +26,7 @@ import {
   type ServiceRequest,
   ServiceRequestStatus,
 } from "@workspace/api-client-react"
+import { parseLocationCoordinates } from "@/lib/location"
 import {
   Bar,
   BarChart,
@@ -131,6 +132,14 @@ const STATUS_FILTERS: Array<{ value: StatusFilter; label: string }> = [
 
 function parseCoordinates(location: string, request: ServiceRequest): Coordinates | null {
   const locationText = String(location ?? "")
+  const savedCoordinates = parseLocationCoordinates(
+    (request as ServiceRequest & { locationCoordinates?: string | null }).locationCoordinates,
+  )
+  if (savedCoordinates) {
+    const isSaudiCoordinate = savedCoordinates.lat >= 16 && savedCoordinates.lat <= 33 &&
+      savedCoordinates.lng >= 34 && savedCoordinates.lng <= 56
+    if (isSaudiCoordinate) return { ...savedCoordinates, source: "location" }
+  }
   const gpsMatch = locationText.match(
     /((?:إحداثيات\s*GPS\s*تقريبية|إحداثيات\s*تقريبية|إحداثيات\s*GPS|GPS\s*تقريبية|GPS|الإحداثيات))\s*[:：]?\s*\(?\s*(-?\d+(?:\.\d+)?)\s*[,،]\s*(-?\d+(?:\.\d+)?)\s*\)?/i,
   )

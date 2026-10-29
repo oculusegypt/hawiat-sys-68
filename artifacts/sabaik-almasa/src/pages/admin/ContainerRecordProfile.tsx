@@ -909,7 +909,7 @@ function ContainerProfile({ record, records }: { record: ContainerSystemRecord; 
         Number(payload.containerRecordId ?? 0) === record.id
     })
     : []
-  const currentCycleEvidence = [
+  const currentCycleEvidenceCandidates = [
     ...currentCycleWorkOrders.map(item => ({
       id: `request-${item.id}`,
       label: `الطلب #${item.id} · ${item.serviceType}`,
@@ -938,6 +938,18 @@ function ContainerProfile({ record, records }: { record: ContainerSystemRecord; 
       }
     }),
   ]
+  const currentCycleEvidenceByPath = new Map<string, (typeof currentCycleEvidenceCandidates)[number]>()
+  const evidencePriority = (id: string) => id.startsWith("work-order-") ? 3 : id.startsWith("request-") ? 2 : 1
+  for (const item of currentCycleEvidenceCandidates) {
+    const stablePath = item.url
+      ? String(item.url).split("?")[0].replace(/^https?:\/\/[^/]+/i, "")
+      : item.id
+    const existing = currentCycleEvidenceByPath.get(stablePath)
+    if (!existing || evidencePriority(item.id) > evidencePriority(existing.id)) {
+      currentCycleEvidenceByPath.set(stablePath, item)
+    }
+  }
+  const currentCycleEvidence = [...currentCycleEvidenceByPath.values()]
   const customer = records.find(item => item.kind === "customer" && String(item.id) === String(activeContractPayload.customerRecordId))
     ?? records.find(item => item.kind === "customer" && text(payloadOf(item).name ?? payloadOf(item).customerName, "") === text(activeContractPayload.customerName, ""))
   const customerPayload = payloadOf(customer)

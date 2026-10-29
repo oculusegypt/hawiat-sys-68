@@ -1880,11 +1880,12 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
             "SELECT id FROM financial_transactions WHERE source_kind = 'invoice' AND source_id = ? AND status = 'posted' LIMIT 1",
           ).get(existingInvoice.id) as { id: number } | undefined;
           if (invoiceTotal > 0 && !invoicePosting) {
-            const issuedPayload = {
+            const issuedPayload: Record<string, unknown> = {
               ...existingInvoicePayload,
               invoiceStatus: "due",
               lifecycleStatus: "due",
               paymentStatus: Number(existingInvoicePayload.paid ?? 0) > 0 ? "partially_paid" : "unpaid",
+              operationKey: String(existingInvoicePayload.operationKey ?? "").trim() || `contract-invoice-${existingInvoice.id}`,
             };
             invoice = tx.update(containerSystemRecordsTable).set({
               status: "due",
@@ -1894,10 +1895,10 @@ router.post("/admin/container-system/contracts/workflow", requireContainerPermis
             postToFinancialCoreInTransaction({
               sourceKind: "invoice",
               sourceId: invoice.id,
-              reference: invoice.reference,
+              reference: invoice.reference || String(issuedPayload.invoiceNumber ?? `INV-${invoice.id}`),
               amount: invoiceTotal,
               date: String(issuedPayload.date ?? now).slice(0, 10),
-              operationKey: String(issuedPayload.operationKey ?? ""),
+              operationKey: String(issuedPayload.operationKey),
               createdBy: adminReq.adminId,
             });
           }
@@ -2243,14 +2244,39 @@ router.post("/admin/container-system/financial/settle", requireContainerPermissi
               String(invoicePayload.contractNumber ?? "").trim() !== contractNumber) {
             throw new Error("الفاتورة لا تتبع العقد المحدد");
           }
-          if (!["posted", "due", "overdue", "partially_paid"].includes(invoice.status)) {
+          const invoiceTotal = Number(invoicePayload.total ?? invoicePayload.amount ?? 0);
+          const canIssueContractInvoice = invoiceTotal > 0 &&
+            !["cancelled", "rejected", "archived"].includes(invoice.status);
+          if (!["posted", "due", "overdue", "partially_paid"].includes(invoice.status) && !canIssueContractInvoice) {
             throw new Error("لا يمكن التحصيل على فاتورة غير مرحّلة أو مغلقة");
           }
           const invoicePosting = sqlite.prepare(
             "SELECT id FROM financial_transactions WHERE source_kind = 'invoice' AND source_id = ? AND status = 'posted' LIMIT 1",
           ).get(invoice.id) as { id: number } | undefined;
-          if (!invoicePosting) throw new Error("الفاتورة لم تُرحّل إلى النواة المالية بعد");
-          const invoiceTotal = Number(invoicePayload.total ?? invoicePayload.amount ?? 0);
+          if (!invoicePosting) {
+            if (!canIssueContractInvoice) throw new Error("الفاتورة لم تُرحّل إلى النواة المالية بعد");
+            const issuedPayload: Record<string, unknown> = {
+              ...invoicePayload,
+              invoiceStatus: "due",
+              lifecycleStatus: "due",
+              paymentStatus: Number(invoicePayload.paid ?? 0) > 0 ? "partially_paid" : "unpaid",
+              operationKey: String(invoicePayload.operationKey ?? "").trim() || `contract-invoice-${invoice.id}`,
+            };
+            tx.update(containerSystemRecordsTable).set({
+              status: "due",
+              payload: JSON.stringify(issuedPayload),
+              updatedAt: new Date().toISOString(),
+            }).where(eq(containerSystemRecordsTable.id, invoice.id)).run();
+            postToFinancialCoreInTransaction({
+              sourceKind: "invoice",
+              sourceId: invoice.id,
+              reference: invoice.reference || String(issuedPayload.invoiceNumber ?? `INV-${invoice.id}`),
+              amount: invoiceTotal,
+              date: String(issuedPayload.date ?? new Date().toISOString()).slice(0, 10),
+              operationKey: String(issuedPayload.operationKey),
+              createdBy: invoice.createdBy,
+            });
+          }
           const invoicePaid = collectionRows.reduce((sum, row) => {
             const payment = parsePayload(row.payload);
             const entry = Array.isArray(payment.allocations)
@@ -2341,14 +2367,11 @@ router.post("/admin/container-system/financial/settle", requireContainerPermissi
             }, 0);
             const invoicePaid = invoicePaidBefore + item.amount;
             const invoiceRemaining = Math.max(invoiceTotal - invoicePaid, 0);
-            const dueDate = String(invoicePayload.dueDate ?? invoicePayload.date ?? "");
             const nextInvoiceStatus = invoiceRemaining <= 0.01
               ? "paid"
               : invoicePaid > 0
                 ? "partially_paid"
-                : dueDate && Date.parse(dueDate) < Date.now()
-                  ? "overdue"
-                  : "due";
+                : "due";
             tx.update(containerSystemRecordsTable).set({
               status: nextInvoiceStatus,
               payload: JSON.stringify({

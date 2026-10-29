@@ -6,6 +6,7 @@ import { getSetting } from "./settings";
 import { createNotification } from "../lib/pushNotifications";
 import { syncCustomerFromRequest } from "../lib/customerSync";
 import { logger } from "../lib/logger";
+import { encodeLocationText } from "../lib/location";
 
 const router = Router();
 
@@ -24,6 +25,7 @@ interface FlowData {
   duration?: string;
   notes?: string;
   location?: string;
+  locationCoordinates?: string;
   name?: string;
   phone?: string;
   isQuoteRequest?: boolean;
@@ -774,7 +776,7 @@ async function handleConfirm(message: string, intent: string, state: FlowState, 
 
   if (intent === "confirm" || /تأكيد|ارسل|يلا|ماشي|نعم|اوكي|موافق/.test(t)) {
     const {
-      serviceType, containerSize, location, name, phone, activityType,
+      serviceType, containerSize, location, locationCoordinates, name, phone, activityType,
       monthlyEvacuations, appointmentType, scheduledAt, duration, notes, containerCount, isQuoteRequest,
       packageDetailsText,
     } = state.data;
@@ -793,7 +795,7 @@ async function handleConfirm(message: string, intent: string, state: FlowState, 
         phone: phone || "",
         serviceType: serviceType || "غير محدد",
         containerSize: containerSize || "",
-        location: location || "",
+        location: encodeLocationText(location || "", locationCoordinates),
         duration: duration || null,
         appointmentType: appointmentType || "immediate",
         scheduledAt: scheduledAt || null,

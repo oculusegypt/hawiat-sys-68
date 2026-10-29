@@ -847,6 +847,7 @@ router.post("/service-requests", async (req, res) => {
     serviceType,
     containerSize,
     location,
+    locationCoordinates,
     duration,
     notes,
     appointmentType,

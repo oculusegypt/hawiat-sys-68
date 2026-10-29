@@ -30,7 +30,7 @@ export function encodeLocationText(value: unknown, explicitCoordinates?: unknown
 }
 
 export function cleanLocationPayload<T extends Record<string, unknown>>(payload: T): T {
-  const next = { ...payload };
+  const next: Record<string, unknown> = { ...payload };
   const locationFields = [
     ["location", "locationCoordinates"],
     ["address", "addressCoordinates"],
@@ -48,5 +48,5 @@ export function cleanLocationPayload<T extends Record<string, unknown>>(payload:
     if (coordinates && !existingCoordinates) next[coordinateField] = coordinates;
     next[field] = address || (coordinates ? "الموقع المحدد" : value.trim());
   }
-  return next;
+  return next as T;
 }

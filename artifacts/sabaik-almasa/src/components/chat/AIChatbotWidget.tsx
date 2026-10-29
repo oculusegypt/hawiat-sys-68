@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { LiveSupportChat } from "./LiveSupportChat"
 import { getHighAccuracyPosition } from "@/lib/reverseGeocode"
+import { cleanLocationText } from "@/lib/location"
 import { DraggableMapPicker } from "@/components/ui/DraggableMapPicker"
 import { useSiteSettings } from "@/context/SiteSettingsContext"
 import { playNotificationChime, unlockNotificationAudio, sendVisitorHeartbeat, getKnownCustomerInfo, getVisitorTracking } from "@/lib/visitorAttribution"
@@ -37,6 +38,7 @@ interface FlowState {
     duration?: string
     notes?: string
     location?: string
+    locationCoordinates?: string
     name?: string
     phone?: string
     propertyDetails?: Record<string, unknown>
@@ -488,7 +490,7 @@ function OrderConfirmCard({
     ...(data.monthlyEvacuations ? [{ label: "التفريغات", value: `${data.monthlyEvacuations} / شهر`, icon: <Package size={12} /> }] : []),
     ...(data.packageDetailsText ? [{ label: "تفاصيل الباقة", value: data.packageDetailsText as string, icon: <FileText size={12} /> }] : []),
     ...(data.notes ? [{ label: "الملاحظات", value: data.notes as string, icon: <FileText size={12} /> }] : []),
-    { label: "الموقع",  value: data.location      as string, icon: <MapPin size={12} /> },
+    { label: "الموقع",  value: cleanLocationText(data.location, "الموقع المحدد"), icon: <MapPin size={12} /> },
     { label: "الاسم",   value: data.name           as string, icon: <User size={12} /> },
     { label: "الجوال",  value: data.phone          as string, icon: <Phone size={12} /> },
   ].filter(r => r.value)
@@ -549,7 +551,7 @@ function SuccessCard({ data, orderTrackingEnabled }: {
       data.containerSize ? `📦 *الحاوية:* ${data.containerSize}` : "",
       data.containerCount ? `🔢 *العدد:* ${data.containerCount}` : "",
       data.duration ? `⏱️ *المدة:* ${data.duration}` : "",
-      data.location ? `📍 *الموقع:* ${data.location}` : "",
+      data.location ? `📍 *الموقع:* ${cleanLocationText(data.location, "الموقع المحدد")}` : "",
       data.packageDetailsText ? `📝 *المواصفات:* ${data.packageDetailsText}` : "",
     ].filter(Boolean)
     return encodeURIComponent(lines.join("\n"))
@@ -601,7 +603,7 @@ function SuccessCard({ data, orderTrackingEnabled }: {
 
 // ─── Location Picker (in-chat) ────────────────────────────────────────────
 
-function LocationPickerInChat({ onSend }: { onSend: (loc: string) => void }) {
+function LocationPickerInChat({ onSend }: { onSend: (loc: string, coordinates?: string) => void }) {
   const [address,   setAddress]   = useState("")
   const [gpsState,  setGpsState]  = useState<"idle" | "loading" | "map" | "error">("idle")
   const [gpsLabel,  setGpsLabel]  = useState("")
@@ -637,10 +639,9 @@ function LocationPickerInChat({ onSend }: { onSend: (loc: string) => void }) {
           initialLat={initCoords.lat}
           initialLng={initCoords.lng}
           onConfirm={(addr, lat, lng) => {
-            // نُضمّن الإحداثيات مع العنوان للاتجاهات الدقيقة
-            const fullLocation = `${addr}\nإحداثيات GPS: ${lat},${lng}`
-            handleMapConfirm(fullLocation)
-            onSend(fullLocation)
+            const cleanAddress = addr.trim() || "الموقع المحدد"
+            handleMapConfirm(cleanAddress)
+            onSend(cleanAddress, `${lat.toFixed(6)},${lng.toFixed(6)}`)
           }}
           compact
         />
@@ -708,11 +709,12 @@ function MessageBubble({
   onEditOrder: () => void
   orderTrackingEnabled: boolean
 }) {
+  const visibleMessageText = cleanLocationText(msg.text, "الموقع المحدد")
   if (msg.isUser) {
     return (
       <div className="flex justify-end mb-3">
         <div className="max-w-[78%] px-4 py-2.5 rounded-2xl rounded-br-sm bg-primary text-white text-sm shadow-sm leading-relaxed">
-          {msg.text}
+          {visibleMessageText}
         </div>
       </div>
     )
@@ -733,7 +735,7 @@ function MessageBubble({
         {/* Text bubble */}
         {msg.type !== "order_confirm" && msg.type !== "success" && (
           <div className="bg-white border border-gray-100 shadow-sm px-4 py-3 rounded-2xl rounded-bl-sm text-sm text-gray-800 leading-relaxed whitespace-pre-line">
-            {renderText(msg.text)}
+            {renderText(visibleMessageText)}
           </div>
         )}
 
@@ -1086,7 +1088,7 @@ export function AIChatbotWidget({ onOpenChange }: { onOpenChange?: (open: boolea
     })
   }
 
-  async function sendMessage(text: string, displayText = text) {
+  async function sendMessage(text: string, displayText = text, locationCoordinates?: string) {
     if (!text.trim() || isTyping || botDisabled) return
     setMessages((prev) => [
       ...prev,
@@ -1095,7 +1097,10 @@ export function AIChatbotWidget({ onOpenChange }: { onOpenChange?: (open: boolea
     setInput("")
     setIsTyping(true)
     try {
-      const resp = await sendToBot(text, flowState, conversationId)
+      const requestFlowState = locationCoordinates
+        ? { ...flowState, data: { ...flowState.data, location: text, locationCoordinates } }
+        : flowState
+      const resp = await sendToBot(text, requestFlowState, conversationId)
       setIsTyping(false)
       addBotMessage(resp)
       if (resp.flowState) setFlowState(resp.flowState)
@@ -1261,7 +1266,7 @@ export function AIChatbotWidget({ onOpenChange }: { onOpenChange?: (open: boolea
 
             {/* Input Area */}
             {showLocationPicker ? (
-              <LocationPickerInChat onSend={(loc) => sendMessage(loc)} />
+              <LocationPickerInChat onSend={(loc, coordinates) => sendMessage(loc, loc, coordinates)} />
             ) : showDatePicker ? (
               <DateTimePickerInChat onSend={(date) => sendMessage(date)} />
             ) : showTextInput ? (

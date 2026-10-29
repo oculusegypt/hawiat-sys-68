@@ -102,10 +102,6 @@ function hsEnsureCanonicalDispatchTasks(PDO $pdo): void {
         $requestRows = $pdo->query("SELECT * FROM service_requests ORDER BY id ASC")->fetchAll(PDO::FETCH_ASSOC);
         foreach ($requestRows as $request) {
             $serviceType = trim((string)($request['service_type'] ?? ''));
-            // Intake requests are not dispatch tasks until a contract and
-            // container have both been linked by the contract workflow.
-            if ((int)($request['contract_record_id'] ?? 0) <= 0 || (int)($request['container_record_id'] ?? 0) <= 0) continue;
-            if (preg_match('/(?:عقد|عقود)\s*(?:ال)?(?:نظافة|تنظيف)/u', $serviceType)) continue;
             $requestId = (int)$request['id'];
             $linkedRows = [];
             foreach ($workOrders as $row) {
@@ -128,6 +124,10 @@ function hsEnsureCanonicalDispatchTasks(PDO $pdo): void {
                 continue;
             }
 
+            // Intake requests are not dispatch tasks until a contract and
+            // container have both been linked by the contract workflow.
+            if ((int)($request['contract_record_id'] ?? 0) <= 0 || (int)($request['container_record_id'] ?? 0) <= 0) continue;
+            if (preg_match('/(?:عقد|عقود)\s*(?:ال)?(?:نظافة|تنظيف)/u', $serviceType)) continue;
             $scheduledAt = trim((string)($request['scheduled_at'] ?? ''));
             $contractId = (int)($request['contract_record_id'] ?? 0);
             $containerId = (int)($request['container_record_id'] ?? 0);

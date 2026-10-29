@@ -1022,7 +1022,7 @@ export default function WorkOrders() {
   const driverQuery = useGetDriverWorkOrders(undefined, {
     query: { enabled: isDriver, queryKey: getGetDriverWorkOrdersQueryKey() },
   });
-  const managerQuery = useGetAdminWorkOrders({
+  const managerQuery = useGetAdminWorkOrders({}, {
     query: { enabled: isManager, queryKey: getGetAdminWorkOrdersQueryKey() },
   });
   const deliveredContractsQuery = useGetContainerSystemRecords(
