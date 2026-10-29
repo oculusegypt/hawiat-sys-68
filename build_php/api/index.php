@@ -732,7 +732,7 @@ try {
 
     function sessionSecret(): string {
         $secret = trim((string)getenv('SESSION_SECRET'));
-        $embeddedSecret = '188ab6f210430dcf3d01185fd90d85ca678c079686bcee6ead70c0944e6b022f';
+        $embeddedSecret = '13d8711c9b0c48a796ffd9f1c114b68e6825a91cdd2ad9cd084d032fea4b1810';
         if ($secret === '' && strlen($embeddedSecret) === 64) {
             $secret = $embeddedSecret;
         }
@@ -2748,6 +2748,9 @@ try {
         $serviceType = trim((string)($input['serviceType'] ?? $input['service'] ?? 'تنظيف عام'));
         $containerSize = trim((string)($input['containerSize'] ?? $input['package'] ?? ''));
         $location = trim((string)($input['location'] ?? $input['address'] ?? 'الرياض'));
+        $storedLocation = hsEncodeLocationText($location, $input['locationCoordinates'] ?? null);
+        $locationParts = hsSplitLocationText($storedLocation);
+        $displayLocation = $locationParts['address'] !== '' ? $locationParts['address'] : 'الموقع المحدد';
         $notes = trim((string)($input['notes'] ?? $input['details'] ?? ''));
         $isQuoteRequest = !empty($input['isQuoteRequest']);
         $duration = $isQuoteRequest
@@ -2794,7 +2797,7 @@ try {
             ':email' => $email,
             ':stype' => $serviceType,
             ':csize' => $containerSize,
-            ':loc' => $location,
+            ':loc' => $storedLocation,
             ':notes' => $notes,
             ':duration' => $duration,
             ':apptype' => $appointmentType,
@@ -2819,7 +2822,7 @@ try {
                 'phone' => $phone,
                 'email' => $email,
                 'service_type' => $serviceType,
-                'location' => $location,
+                'location' => $displayLocation,
             ]);
         } catch (\Throwable $error) {
             error_log("Could not create provisional customer linkage for request #{$newId}");
@@ -2827,7 +2830,7 @@ try {
 
         // Create Notification in notifications table
         $notifTitle = "طلب خدمة جديد #{$newId}";
-        $notifMsg = "طلب جديد من {$clientName} ({$serviceType}) - {$location}";
+        $notifMsg = "طلب جديد من {$clientName} ({$serviceType}) - {$displayLocation}";
         try {
             $notifStmt = $pdo->prepare("INSERT INTO notifications (title, message, type, is_read, ref_id, ref_type, created_at) VALUES (:title, :msg, 'request', 0, :ref_id, 'service_request', :now)");
             $notifStmt->execute([
@@ -2922,7 +2925,8 @@ try {
                     'containerSize' => $r['container_size'] ?? '',
                     'propertyType' => $r['property_type'] ?? null,
                     'areaSize' => $r['area_size'] ?? null,
-                    'location' => $r['location'] ?? '',
+                    'location' => (($locationParts = hsSplitLocationText($r['location'] ?? ''))['address'] !== '' ? $locationParts['address'] : ($locationParts['coordinates'] !== '' ? 'الموقع المحدد' : '')),
+                    'locationCoordinates' => $locationParts['coordinates'] !== '' ? $locationParts['coordinates'] : null,
                     'duration' => $r['duration'] ?? null,
                     'notes' => $r['notes'] ?? '',
                     'appointmentType' => $r['appointment_type'] ?? 'immediate',
@@ -2934,6 +2938,11 @@ try {
                     'driverNotes' => $r['driver_notes'] ?? null,
                     'driverStartedAt' => $r['driver_started_at'] ?? null,
                     'driverCompletedAt' => $r['driver_completed_at'] ?? null,
+                    'driverProofPhotoUrl' => hsRefreshPrivateUploadUrl($r['driver_proof_photo_url'] ?? null),
+                    'driverReceiverName' => $r['driver_receiver_name'] ?? null,
+                    'driverSignatureData' => $r['driver_signature_data'] ?? null,
+                    'driverLocationLat' => $r['driver_location_lat'] ?? null,
+                    'driverLocationLng' => $r['driver_location_lng'] ?? null,
                     'assignedAt' => $r['assigned_at'] ?? null,
                     'sessionId' => $sessionId,
                     'conversationId' => $visitor && $visitor['conversation_id'] !== null ? (int)$visitor['conversation_id'] : null,
@@ -3001,7 +3010,19 @@ try {
         foreach ($mapping as $jsonKey => $dbCol) {
             if (array_key_exists($jsonKey, $input)) {
                 $fields[] = "{$dbCol} = :{$jsonKey}";
-                $params[":{$jsonKey}"] = $input[$jsonKey];
+                if ($jsonKey === 'location') {
+                    $coordinates = $input['locationCoordinates'] ?? null;
+                    if ($coordinates === null) {
+                        $previous = hsSplitLocationText($current['location'] ?? '');
+                        $nextAddress = hsSplitLocationText($input[$jsonKey]);
+                        if ($previous['coordinates'] !== '' && $previous['address'] === $nextAddress['address']) {
+                            $coordinates = $previous['coordinates'];
+                        }
+                    }
+                    $params[":{$jsonKey}"] = hsEncodeLocationText($input[$jsonKey], $coordinates);
+                } else {
+                    $params[":{$jsonKey}"] = $input[$jsonKey];
+                }
             }
         }
         $terminalRequestStatus = in_array((string)($input['status'] ?? ''), ['cancelled', 'rejected'], true);
@@ -3079,6 +3100,12 @@ try {
         $stmt = $pdo->prepare("SELECT * FROM service_requests WHERE id = :id LIMIT 1");
         $stmt->execute([':id' => $id]);
         $row = $stmt->fetch();
+        if ($row) {
+            $locationParts = hsSplitLocationText($row['location'] ?? '');
+            $row['location'] = $locationParts['address'] !== '' ? $locationParts['address'] : ($locationParts['coordinates'] !== '' ? 'الموقع المحدد' : '');
+            $row['locationCoordinates'] = $locationParts['coordinates'] !== '' ? $locationParts['coordinates'] : null;
+            if (!empty($row['driver_proof_photo_url'])) $row['driverProofPhotoUrl'] = hsRefreshPrivateUploadUrl($row['driver_proof_photo_url']);
+        }
         echo json_encode($row ?: ['id' => $id, 'success' => true], JSON_UNESCAPED_UNICODE);
         exit;
     }

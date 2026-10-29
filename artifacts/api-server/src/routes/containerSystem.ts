@@ -2557,7 +2557,7 @@ router.post("/admin/container-system/financial/settle", requireContainerPermissi
           }
           const invoiceTotal = Number(invoicePayload.total ?? invoicePayload.amount ?? 0);
           const canIssueContractInvoice = invoiceTotal > 0 &&
-            !["cancelled", "rejected", "archived"].includes(invoice.status);
+            ["approved", "due", "overdue", "partially_paid", "paid"].includes(invoice.status);
           if (!["posted", "due", "overdue", "partially_paid"].includes(invoice.status) && !canIssueContractInvoice) {
             throw new Error("لا يمكن التحصيل على فاتورة غير مرحّلة أو مغلقة");
           }

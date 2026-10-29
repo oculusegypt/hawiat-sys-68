@@ -26,3 +26,4 @@
 - [Production-like demo identity safety](demo-identity-safety.md) — unverified phones must not link or overwrite existing profiles; isolate tests and merge only after explicit review.
 - [Production-like database testing](production-like-db-testing.md) — use Replit secrets for real admin/driver login tests; keep synthetic business-data tests isolated.
 - [Contract issuance and live location](contract-issuance-live-location.md) — manual pricing defaults, waste-only identifiers, one dispatch task, and a distinct current-location field.
+- [PHP API test harness](php-api-test-harness.md) — nested PHP `proc_open` route tests can stall; use in-process PHP helpers or the isolated Node lifecycle harness.

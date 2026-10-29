@@ -19,8 +19,152 @@ function hsJson($value, int $status = 200): void {
 
 function hsPayload($value): array {
     if (!$value) return [];
+    if (is_array($value)) return $value;
     $decoded = json_decode($value, true);
     return is_array($decoded) ? $decoded : [];
+}
+
+function hsContractRecordNumber(array $contract): string {
+    $payload = hsPayload($contract['payload'] ?? null);
+    return trim((string)($payload['contractNumber'] ?? ''))
+        ?: trim((string)($payload['contractNo'] ?? ''))
+        ?: trim((string)($contract['reference'] ?? ''));
+}
+
+function hsSettlementInvoiceRelationError(array $invoice, array $contract, int $requestedCustomerId = 0): ?string {
+    if (!hsInvoiceBelongsToContract($invoice, $contract)) return 'الفاتورة لا تتبع العقد المحدد';
+    $invoicePayload = hsPayload($invoice['payload'] ?? null);
+    $contractPayload = hsPayload($contract['payload'] ?? null);
+    $invoiceCustomerId = (int)($invoicePayload['customerRecordId'] ?? 0);
+    $contractCustomerId = (int)($contractPayload['customerRecordId'] ?? 0);
+    if ($requestedCustomerId > 0 && $invoiceCustomerId > 0 && $invoiceCustomerId !== $requestedCustomerId) {
+        return 'الفاتورة لا تتبع العميل المحدد';
+    }
+    if ($requestedCustomerId > 0 && $contractCustomerId > 0 && $contractCustomerId !== $requestedCustomerId) {
+        return 'العقد لا يتبع العميل المحدد';
+    }
+    return null;
+}
+
+function hsInvoiceBelongsToContract(array $invoice, array $contract): bool {
+    if (($invoice['kind'] ?? '') !== 'invoice' || ($contract['kind'] ?? '') !== 'contract') return false;
+    $invoicePayload = hsPayload($invoice['payload'] ?? null);
+    $contractPayload = hsPayload($contract['payload'] ?? null);
+    $invoiceCustomerId = (int)($invoicePayload['customerRecordId'] ?? 0);
+    $contractCustomerId = (int)($contractPayload['customerRecordId'] ?? 0);
+    if ($invoiceCustomerId > 0 && $contractCustomerId > 0 && $invoiceCustomerId !== $contractCustomerId) return false;
+
+    $linkedContractId = (int)($invoicePayload['contractRecordId'] ?? $invoicePayload['contractId'] ?? $invoicePayload['linkedContractId'] ?? 0);
+    if ($linkedContractId > 0) return $linkedContractId === (int)$contract['id'];
+
+    $invoiceNumber = trim((string)($invoicePayload['contractNumber'] ?? $invoicePayload['contractNo'] ?? ''));
+    $contractNumber = hsContractRecordNumber($contract);
+    return $invoiceNumber !== '' && $contractNumber !== '' && $invoiceNumber === $contractNumber;
+}
+
+function hsFinancialAllocationForContract(array $row, array $contract, array $records): ?array {
+    $payload = hsPayload($row['payload'] ?? null);
+    if (!is_array($payload['allocations'] ?? null)) return null;
+    $allocations = $payload['allocations'];
+    $withContractIds = array_values(array_filter($allocations, static fn($item): bool =>
+        is_array($item) && (int)($item['contractId'] ?? 0) > 0));
+    if ($withContractIds !== []) {
+        foreach ($withContractIds as $allocation) {
+            if ((int)($allocation['contractId'] ?? 0) === (int)$contract['id']) return $allocation;
+        }
+        return null;
+    }
+
+    $withInvoiceIds = array_values(array_filter($allocations, static fn($item): bool =>
+        is_array($item) && (int)($item['invoiceId'] ?? 0) > 0));
+    if ($withInvoiceIds !== []) {
+        foreach ($withInvoiceIds as $allocation) {
+            foreach ($records as $invoice) {
+                if (($invoice['kind'] ?? '') === 'invoice'
+                    && (int)($invoice['id'] ?? 0) === (int)$allocation['invoiceId']
+                    && hsInvoiceBelongsToContract($invoice, $contract)) return $allocation;
+            }
+        }
+        return null;
+    }
+
+    $contractNumber = hsContractRecordNumber($contract);
+    if ($contractNumber === '') return null;
+    foreach ($allocations as $allocation) {
+        if (is_array($allocation) && trim((string)($allocation['contractNumber'] ?? '')) === $contractNumber) return $allocation;
+    }
+    return null;
+}
+
+function hsRecordReferencesContract(array $row, array $contract, array $records): bool {
+    $payload = hsPayload($row['payload'] ?? null);
+    $contractPayload = hsPayload($contract['payload'] ?? null);
+    $rowCustomerId = (int)($payload['customerRecordId'] ?? 0);
+    $contractCustomerId = (int)($contractPayload['customerRecordId'] ?? 0);
+    if ($rowCustomerId > 0 && $contractCustomerId > 0 && $rowCustomerId !== $contractCustomerId) return false;
+
+    if (is_array($payload['allocations'] ?? null) && $payload['allocations'] !== []) {
+        $allocations = $payload['allocations'];
+        $withContractIds = array_values(array_filter($allocations, static fn($item): bool =>
+            is_array($item) && (int)($item['contractId'] ?? 0) > 0));
+        if ($withContractIds !== []) {
+            foreach ($withContractIds as $allocation) {
+                if ((int)$allocation['contractId'] === (int)$contract['id']) return true;
+            }
+            return false;
+        }
+
+        $withInvoiceIds = array_values(array_filter($allocations, static fn($item): bool =>
+            is_array($item) && (int)($item['invoiceId'] ?? 0) > 0));
+        if ($withInvoiceIds !== []) return hsFinancialAllocationForContract($row, $contract, $records) !== null;
+
+        $allocationNumbers = array_values(array_filter(array_map(static fn($item): string =>
+            is_array($item) ? trim((string)($item['contractNumber'] ?? '')) : '', $allocations)));
+        if ($allocationNumbers !== []) {
+            $contractNumber = hsContractRecordNumber($contract);
+            return $contractNumber !== '' && in_array($contractNumber, $allocationNumbers, true);
+        }
+    }
+
+    $directContractId = (int)($payload['contractRecordId'] ?? $payload['contractId'] ?? $payload['linkedContractId'] ?? 0);
+    if ($directContractId > 0) return $directContractId === (int)$contract['id'];
+
+    $invoiceId = (int)($payload['invoiceRecordId'] ?? $payload['originalInvoiceId'] ?? $payload['invoiceId'] ?? 0);
+    if ($invoiceId > 0) {
+        foreach ($records as $invoice) {
+            if (($invoice['kind'] ?? '') === 'invoice' && (int)($invoice['id'] ?? 0) === $invoiceId) {
+                return hsInvoiceBelongsToContract($invoice, $contract);
+            }
+        }
+        return false;
+    }
+
+    $originalPaymentId = (int)($payload['originalPaymentId'] ?? $payload['sourcePaymentId'] ?? 0);
+    if ($originalPaymentId > 0) {
+        foreach ($records as $original) {
+            if (in_array((string)($original['kind'] ?? ''), ['payment', 'receipt'], true)
+                && (int)($original['id'] ?? 0) === $originalPaymentId) {
+                return hsRecordReferencesContract($original, $contract, $records);
+            }
+        }
+    }
+
+    $invoiceNumber = trim((string)($payload['invoiceNumber'] ?? ''));
+    if ($invoiceNumber !== '') {
+        $matchingInvoices = array_values(array_filter($records, static fn(array $invoice): bool =>
+            ($invoice['kind'] ?? '') === 'invoice'
+            && trim((string)(hsPayload($invoice['payload'] ?? null)['invoiceNumber'] ?? $invoice['reference'] ?? '')) === $invoiceNumber));
+        if ($matchingInvoices !== []) {
+            foreach ($matchingInvoices as $invoice) {
+                if (hsInvoiceBelongsToContract($invoice, $contract)) return true;
+            }
+            return false;
+        }
+    }
+
+    $recordNumber = trim((string)($payload['contractNumber'] ?? ''));
+    $contractNumber = hsContractRecordNumber($contract);
+    return $contractNumber !== '' && $recordNumber !== '' && $recordNumber === $contractNumber;
 }
 
 function hsContractPatchRequiresAmendment(PDO $pdo, array $contract, array $nextPayload): bool {
@@ -41,14 +185,21 @@ function hsContractPatchRequiresAmendment(PDO $pdo, array $contract, array $next
     if (!$termsChanged) return false;
 
     $contractId = (int)$contract['id'];
-    $contractNumber = trim((string)($before['contractNumber'] ?? $contract['reference'] ?? ''));
+    $contractNumber = hsContractRecordNumber($contract);
     $referencesContract = static function(array $payload) use ($contractId, $contractNumber): bool {
-        if ((int)($payload['contractRecordId'] ?? $payload['contractId'] ?? 0) === $contractId) return true;
-        if ($contractNumber !== '' && trim((string)($payload['contractNumber'] ?? '')) === $contractNumber) return true;
-        foreach (($payload['allocations'] ?? []) as $allocation) {
-            if (is_array($allocation) && (int)($allocation['contractId'] ?? 0) === $contractId) return true;
+        $directId = (int)($payload['contractRecordId'] ?? $payload['contractId'] ?? 0);
+        if ($directId > 0) return $directId === $contractId;
+        $allocations = is_array($payload['allocations'] ?? null) ? $payload['allocations'] : [];
+        $allocationIds = array_values(array_filter($allocations, static fn($allocation): bool =>
+            is_array($allocation) && (int)($allocation['contractId'] ?? 0) > 0));
+        if ($allocationIds !== []) {
+            foreach ($allocationIds as $allocation) {
+                if ((int)$allocation['contractId'] === $contractId) return true;
+            }
+            return false;
         }
-        return false;
+        $number = trim((string)($payload['contractNumber'] ?? ''));
+        return $contractNumber !== '' && $number !== '' && $number === $contractNumber;
     };
     $lifecycleAdvanced = in_array((string)$contract['status'], ['delivered', 'returned', 'closed'], true);
     $financialPosted = false;
@@ -159,13 +310,99 @@ function hsServiceRequestMutationIssue(PDO $pdo, array $request, array $input): 
     return null;
 }
 
+function hsSplitLocationText($value, $explicitCoordinates = null): array {
+    $raw = trim((string)($value ?? ''));
+    $explicit = trim((string)($explicitCoordinates ?? ''));
+    $coordinatePattern = '/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/';
+    $markerPattern = '/(?:إحداثيات\s*GPS|GPS)\s*[:：]\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/iu';
+    $lat = null;
+    $lng = null;
+    $match = [];
+    if (preg_match($coordinatePattern, $explicit, $match)) {
+        $lat = (float)$match[1];
+        $lng = (float)$match[2];
+    } elseif (preg_match($markerPattern, $raw, $match)) {
+        $lat = (float)$match[1];
+        $lng = (float)$match[2];
+    } elseif (preg_match($coordinatePattern, $raw, $match)) {
+        $lat = (float)$match[1];
+        $lng = (float)$match[2];
+    }
+    $coordinates = $lat !== null && $lng !== null && abs($lat) <= 90 && abs($lng) <= 180
+        ? rtrim(rtrim(number_format($lat, 8, '.', ''), '0'), '.') . ',' . rtrim(rtrim(number_format($lng, 8, '.', ''), '0'), '.')
+        : '';
+    if (preg_match($markerPattern, $raw)) {
+        $withoutMarker = (string)preg_replace(
+            '/\s*\(?\s*(?:إحداثيات\s*GPS|GPS)\s*[:：]\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\)?/iu',
+            '',
+            $raw,
+        );
+        $address = (string)preg_replace('/^[\s,،()]+|[\s,،()]+$/u', '', $withoutMarker);
+    } else {
+        $address = preg_match($coordinatePattern, $raw) ? '' : $raw;
+    }
+    return ['address' => $address, 'coordinates' => $coordinates];
+}
+
+function hsEncodeLocationText($value, $explicitCoordinates = null): string {
+    $raw = trim((string)($value ?? ''));
+    $parts = hsSplitLocationText($raw, $explicitCoordinates);
+    if ($parts['coordinates'] === '') return $parts['address'] !== '' ? $parts['address'] : $raw;
+    return $parts['address'] . "\nإحداثيات GPS: " . $parts['coordinates'];
+}
+
+function hsCleanLocationPayload(array $payload): array {
+    $fields = [
+        'location' => 'locationCoordinates',
+        'address' => 'addressCoordinates',
+        'serviceAddress' => 'serviceAddressCoordinates',
+        'customerAddress' => 'customerAddressCoordinates',
+        'currentLocation' => 'currentLocationCoordinates',
+        'siteAddress' => 'siteAddressCoordinates',
+    ];
+    foreach ($fields as $field => $coordinateField) {
+        if (!isset($payload[$field]) || !is_string($payload[$field])) continue;
+        $explicit = $payload[$coordinateField] ?? ($field === 'location' ? ($payload['locationCoordinates'] ?? null) : null);
+        $parts = hsSplitLocationText($payload[$field], $explicit);
+        if ($parts['coordinates'] !== '' && empty($payload[$coordinateField])) $payload[$coordinateField] = $parts['coordinates'];
+        $payload[$field] = $parts['address'] !== '' ? $parts['address'] : ($parts['coordinates'] !== '' ? 'الموقع المحدد' : trim($payload[$field]));
+    }
+    return $payload;
+}
+
+function hsRefreshPrivateUploadUrl($value): ?string {
+    $raw = trim((string)($value ?? ''));
+    if ($raw === '') return null;
+    $path = parse_url($raw, PHP_URL_PATH);
+    if (!is_string($path) || !preg_match('~^/api/private-uploads/([^/?#]+)$~', $path, $match)) return $raw;
+    $filename = rawurldecode($match[1]);
+    $secret = trim((string)getenv('SESSION_SECRET'));
+    if ($secret === '' || !preg_match('/^[A-Za-z0-9._-]+$/', $filename)) return $raw;
+    $expires = time() + 30 * 60;
+    $signature = rtrim(strtr(base64_encode(hash_hmac('sha256', $filename . '.' . $expires, $secret, true)), '+/', '-_'), '=');
+    return '/api/private-uploads/' . rawurlencode($filename) . '?expires=' . $expires . '&signature=' . rawurlencode($signature);
+}
+
 function hsRecord(array $row): array {
     $row['id'] = (int)$row['id'];
     $row['createdBy'] = isset($row['created_by']) ? (int)$row['created_by'] : null;
     $row['createdAt'] = $row['created_at'] ?? null;
     $row['updatedAt'] = $row['updated_at'] ?? null;
-    $row['payload'] = hsPayload($row['payload'] ?? null);
+    $row['payload'] = hsCleanLocationPayload(hsPayload($row['payload'] ?? null));
+    foreach (['driverProofPhotoUrl', 'proofPhotoUrl'] as $photoField) {
+        if (!empty($row['payload'][$photoField])) $row['payload'][$photoField] = hsRefreshPrivateUploadUrl($row['payload'][$photoField]);
+    }
     unset($row['created_by'], $row['created_at'], $row['updated_at']);
+    return $row;
+}
+
+function hsServiceRequestForResponse(?array $row): ?array {
+    if ($row === null) return null;
+    $location = hsSplitLocationText($row['location'] ?? '');
+    $row['location'] = $location['address'] !== ''
+        ? $location['address']
+        : ($location['coordinates'] !== '' ? 'الموقع المحدد' : '');
+    $row['locationCoordinates'] = $location['coordinates'] !== '' ? $location['coordinates'] : null;
     return $row;
 }
 
@@ -198,6 +435,210 @@ function hsPostedCollections(array $rows): array {
         if (!isset($payload['sourcePaymentId']) && !in_array($key, $keys, true)) $payments[] = $row;
     }
     return $payments;
+}
+
+function hsInvoiceCollectionAmount(array $payment, array $invoice, array $rows): float {
+    if (!in_array($payment['kind'] ?? '', ['payment', 'receipt'], true) || ($payment['status'] ?? '') !== 'posted') return 0.0;
+    $payload = hsPayload($payment['payload'] ?? null);
+    $invoicePayload = hsPayload($invoice['payload'] ?? null);
+    $paymentCustomerId = (int)($payload['customerRecordId'] ?? 0);
+    $invoiceCustomerId = (int)($invoicePayload['customerRecordId'] ?? 0);
+    if ($paymentCustomerId > 0 && $invoiceCustomerId > 0 && $paymentCustomerId !== $invoiceCustomerId) return 0.0;
+
+    if (isset($payload['allocations']) && is_array($payload['allocations'])) {
+        $sum = 0.0;
+        foreach ($payload['allocations'] as $allocation) {
+            if (!is_array($allocation) || (int)($allocation['invoiceId'] ?? 0) !== (int)$invoice['id']) continue;
+            $contractId = (int)($allocation['contractId'] ?? 0);
+            if ($contractId > 0) {
+                $contract = null;
+                foreach ($rows as $candidate) {
+                    if (($candidate['kind'] ?? '') === 'contract' && (int)$candidate['id'] === $contractId) {
+                        $contract = $candidate;
+                        break;
+                    }
+                }
+                if (!$contract || !hsInvoiceBelongsToContract($invoice, $contract)) continue;
+                $contractCustomerId = (int)(hsPayload($contract['payload'] ?? null)['customerRecordId'] ?? 0);
+                if ($paymentCustomerId > 0 && $contractCustomerId > 0 && $paymentCustomerId !== $contractCustomerId) continue;
+            }
+            $sum += max((float)($allocation['amount'] ?? 0), 0.0);
+        }
+        return $sum;
+    }
+
+    $directInvoiceId = (int)($payload['invoiceRecordId'] ?? $payload['invoiceId'] ?? 0);
+    if ($directInvoiceId > 0) return $directInvoiceId === (int)$invoice['id'] ? (float)($payload['amount'] ?? 0) : 0.0;
+    $invoiceNumber = trim((string)($invoicePayload['invoiceNumber'] ?? $invoice['reference'] ?? ''));
+    if ($invoiceNumber === '' || trim((string)($payload['invoiceNumber'] ?? '')) !== $invoiceNumber) return 0.0;
+    $contractId = (int)($payload['contractRecordId'] ?? $payload['contractId'] ?? $payload['linkedContractId'] ?? 0);
+    if ($contractId > 0) {
+        foreach ($rows as $contract) {
+            if (($contract['kind'] ?? '') !== 'contract' || (int)$contract['id'] !== $contractId) continue;
+            if (!hsInvoiceBelongsToContract($invoice, $contract)) return 0.0;
+            $contractCustomerId = (int)(hsPayload($contract['payload'] ?? null)['customerRecordId'] ?? 0);
+            if ($paymentCustomerId > 0 && $contractCustomerId > 0 && $paymentCustomerId !== $contractCustomerId) return 0.0;
+            return (float)($payload['amount'] ?? 0);
+        }
+        return 0.0;
+    }
+    $matches = [];
+    foreach ($rows as $candidate) {
+        if (($candidate['kind'] ?? '') !== 'invoice') continue;
+        $candidatePayload = hsPayload($candidate['payload'] ?? null);
+        if (trim((string)($candidatePayload['invoiceNumber'] ?? $candidate['reference'] ?? '')) !== $invoiceNumber) continue;
+        $candidateCustomerId = (int)($candidatePayload['customerRecordId'] ?? 0);
+        if ($paymentCustomerId > 0 ? $candidateCustomerId === $paymentCustomerId : $candidateCustomerId <= 0) $matches[] = $candidate;
+    }
+    return count($matches) === 1 && (int)$matches[0]['id'] === (int)$invoice['id']
+        ? (float)($payload['amount'] ?? 0)
+        : 0.0;
+}
+
+function hsInvoiceReturnAmount(array $returned, array $invoice, array $rows): float {
+    if (($returned['kind'] ?? '') !== 'payment_return' || ($returned['status'] ?? '') !== 'posted'
+        || ($invoice['kind'] ?? '') !== 'invoice') return 0.0;
+    $payload = hsPayload($returned['payload'] ?? null);
+    $invoicePayload = hsPayload($invoice['payload'] ?? null);
+    $returnCustomerId = (int)($payload['customerRecordId'] ?? 0);
+    $invoiceCustomerId = (int)($invoicePayload['customerRecordId'] ?? 0);
+    if ($returnCustomerId > 0 && $invoiceCustomerId > 0 && $returnCustomerId !== $invoiceCustomerId) return 0.0;
+    $amount = (float)($payload['amount'] ?? $payload['total'] ?? 0);
+    if (!is_finite($amount) || $amount <= 0) return 0.0;
+
+    $contractId = (int)($payload['contractRecordId'] ?? $payload['contractId'] ?? $payload['linkedContractId'] ?? 0);
+    if ($contractId > 0) {
+        $contract = null;
+        foreach ($rows as $candidate) {
+            if (($candidate['kind'] ?? '') === 'contract' && (int)$candidate['id'] === $contractId) {
+                $contract = $candidate;
+                break;
+            }
+        }
+        if (!$contract || !hsInvoiceBelongsToContract($invoice, $contract)) return 0.0;
+        $contractCustomerId = (int)(hsPayload($contract['payload'] ?? null)['customerRecordId'] ?? 0);
+        if ($returnCustomerId > 0 && $contractCustomerId > 0 && $returnCustomerId !== $contractCustomerId) return 0.0;
+    }
+
+    $allocations = isset($payload['allocations']) && is_array($payload['allocations']) ? $payload['allocations'] : [];
+    $allocatedInvoiceIds = array_values(array_filter(array_map(
+        static fn($item): int => is_array($item) ? (int)($item['invoiceId'] ?? 0) : 0,
+        $allocations,
+    ), static fn(int $id): bool => $id > 0));
+    if ($allocatedInvoiceIds !== []) {
+        $sum = 0.0;
+        foreach ($allocations as $allocation) {
+            if (!is_array($allocation) || (int)($allocation['invoiceId'] ?? 0) !== (int)$invoice['id']) continue;
+            $allocationContractId = (int)($allocation['contractId'] ?? 0);
+            if ($allocationContractId > 0) {
+                $allocationContract = null;
+                foreach ($rows as $candidate) {
+                    if (($candidate['kind'] ?? '') === 'contract' && (int)$candidate['id'] === $allocationContractId) {
+                        $allocationContract = $candidate;
+                        break;
+                    }
+                }
+                if (!$allocationContract || !hsInvoiceBelongsToContract($invoice, $allocationContract)) continue;
+            }
+            $sum += max((float)($allocation['amount'] ?? 0), 0.0);
+        }
+        return $sum;
+    }
+
+    $directInvoiceId = (int)($payload['invoiceRecordId'] ?? $payload['originalInvoiceId'] ?? $payload['invoiceId'] ?? 0);
+    if ($directInvoiceId > 0) return $directInvoiceId === (int)$invoice['id'] ? $amount : 0.0;
+    $originalPaymentId = (int)($payload['originalPaymentId'] ?? $payload['sourcePaymentId'] ?? 0);
+    if ($originalPaymentId > 0) {
+        $original = null;
+        foreach ($rows as $candidate) {
+            if (in_array($candidate['kind'] ?? '', ['payment', 'receipt'], true)
+                && ($candidate['status'] ?? '') === 'posted'
+                && (int)$candidate['id'] === $originalPaymentId) {
+                $original = $candidate;
+                break;
+            }
+        }
+        if (!$original) return 0.0;
+        $linkedAmount = hsInvoiceCollectionAmount($original, $invoice, $rows);
+        if ($linkedAmount <= 0) return 0.0;
+        $originalPayload = hsPayload($original['payload'] ?? null);
+        if (isset($originalPayload['allocations']) && is_array($originalPayload['allocations'])) {
+            $originalAllocations = array_values(array_filter($originalPayload['allocations'], 'is_array'));
+            $invoiceIds = array_values(array_unique(array_filter(array_map(
+                static fn(array $item): int => (int)($item['invoiceId'] ?? 0),
+                $originalAllocations,
+            ), static fn(int $id): bool => $id > 0)));
+            $entirelyAllocatedToInvoice = count($invoiceIds) === 1
+                && $invoiceIds[0] === (int)$invoice['id']
+                && count(array_filter($originalAllocations, static fn(array $item): bool => (int)($item['invoiceId'] ?? 0) !== (int)$invoice['id'])) === 0;
+            $originalTotal = (float)($originalPayload['amount'] ?? $originalPayload['total'] ?? 0);
+            if ($invoiceIds !== [] && !$entirelyAllocatedToInvoice && $amount + 0.01 < $originalTotal) return 0.0;
+        }
+        return min($amount, $linkedAmount);
+    }
+
+    $returnInvoiceNumber = trim((string)($payload['invoiceNumber'] ?? $payload['originalInvoiceNumber'] ?? ''));
+    $invoiceNumber = trim((string)($invoicePayload['invoiceNumber'] ?? $invoice['reference'] ?? ''));
+    if ($returnInvoiceNumber === '' || $returnInvoiceNumber !== $invoiceNumber) return 0.0;
+    $matches = [];
+    foreach ($rows as $candidate) {
+        if (($candidate['kind'] ?? '') !== 'invoice') continue;
+        $candidatePayload = hsPayload($candidate['payload'] ?? null);
+        if (trim((string)($candidatePayload['invoiceNumber'] ?? $candidate['reference'] ?? '')) !== $returnInvoiceNumber) continue;
+        $candidateCustomerId = (int)($candidatePayload['customerRecordId'] ?? 0);
+        if ($returnCustomerId > 0 ? $candidateCustomerId === $returnCustomerId : $candidateCustomerId <= 0) $matches[] = $candidate;
+    }
+    return count($matches) === 1 && (int)$matches[0]['id'] === (int)$invoice['id'] ? $amount : 0.0;
+}
+
+function hsInvoiceNetPaidAmount(array $invoice, array $rows): float {
+    $collected = 0.0;
+    foreach (hsPostedCollections($rows) as $payment) $collected += hsInvoiceCollectionAmount($payment, $invoice, $rows);
+    $returned = 0.0;
+    foreach ($rows as $row) {
+        if (($row['kind'] ?? '') === 'payment_return' && ($row['status'] ?? '') === 'posted') {
+            $returned += hsInvoiceReturnAmount($row, $invoice, $rows);
+        }
+    }
+    return max($collected - $returned, 0.0);
+}
+
+function hsInvoiceSettlementUpdatesForRecord(array $record, array $rows): array {
+    $kind = (string)($record['kind'] ?? '');
+    if (!in_array($kind, ['payment', 'receipt', 'payment_return'], true)) return [];
+
+    $linkedRecord = array_merge($record, ['status' => 'posted']);
+    $updates = [];
+    foreach ($rows as $invoice) {
+        if (($invoice['kind'] ?? '') !== 'invoice' || ($invoice['status'] ?? '') === 'archived') continue;
+        $linkedAmount = $kind === 'payment_return'
+            ? hsInvoiceReturnAmount($linkedRecord, $invoice, $rows)
+            : hsInvoiceCollectionAmount($linkedRecord, $invoice, $rows);
+        if ($linkedAmount <= 0.01) continue;
+
+        $payload = hsPayload($invoice['payload'] ?? null);
+        $total = (float)($payload['total'] ?? $payload['amount'] ?? 0);
+        if (!is_finite($total) || $total <= 0.01) continue;
+        $paid = hsInvoiceNetPaidAmount($invoice, $rows);
+        $remaining = max($total - $paid, 0.0);
+        $status = $remaining <= 0.01 ? 'paid' : ($paid > 0.01 ? 'partially_paid' : 'due');
+        if (($invoice['status'] ?? '') === $status
+            && abs((float)($payload['paid'] ?? 0) - $paid) <= 0.01
+            && abs((float)($payload['remaining'] ?? $total) - $remaining) <= 0.01
+            && (string)($payload['invoiceStatus'] ?? '') === $status) {
+            continue;
+        }
+        $updates[] = [
+            'invoice' => $invoice,
+            'status' => $status,
+            'payload' => array_merge($payload, [
+                'paid' => $paid,
+                'remaining' => $remaining,
+                'invoiceStatus' => $status,
+            ]),
+        ];
+    }
+    return $updates;
 }
 
 function hsFinancialTables(PDO $pdo): void {
@@ -718,7 +1159,11 @@ function hsReference(string $kind, array $payload, int $id): string {
 }
 
 function hsAssetCode(array $payload): string {
-    return trim((string)($payload['assetCode'] ?? $payload['code'] ?? ''));
+    foreach (['assetCode', 'containerCode', 'code', 'reference'] as $field) {
+        $code = trim((string)($payload[$field] ?? ''));
+        if ($code !== '') return $code;
+    }
+    return '';
 }
 
 function hsCanonicalAssetStatus(string $value, string $fallback = 'available'): string {
@@ -904,6 +1349,47 @@ function hsHasActiveContainerAssignment(PDO $pdo, int $containerId): bool {
         }
     }
     return false;
+}
+
+function hsContainerAssignmentError(PDO $pdo, array $payload, ?int $ignoreId = null): ?string {
+    $contractId = (int)($payload['contractRecordId'] ?? 0);
+    $containerId = (int)($payload['containerRecordId'] ?? 0);
+    $siteId = (int)($payload['siteRecordId'] ?? 0);
+    if ($contractId <= 0 || $containerId <= 0 || $siteId <= 0) {
+        return 'العقد وأصل الحاوية وموقع العميل مطلوبة للتخصيص';
+    }
+    $rows = hsFindRecords($pdo);
+    $contract = $asset = $site = null;
+    foreach ($rows as $row) {
+        if ((int)$row['id'] === $contractId && $row['kind'] === 'contract' && $row['status'] !== 'archived') $contract = $row;
+        if ((int)$row['id'] === $containerId && in_array($row['kind'], ['container', 'container_asset'], true) && $row['status'] !== 'archived') $asset = $row;
+        if ((int)$row['id'] === $siteId && $row['kind'] === 'customer_site' && $row['status'] !== 'archived') $site = $row;
+    }
+    if (!$contract || !$asset || !$site) return 'العقد أو الحاوية أو موقع العميل غير موجود';
+    if (!in_array($contract['status'], ['active', 'approved', 'issued', 'scheduled', 'delivered'], true)) {
+        return 'لا يمكن تخصيص حاوية لعقد غير نشط';
+    }
+    $contractPayload = hsPayload($contract['payload']);
+    $assetPayload = hsPayload($asset['payload']);
+    $sitePayload = hsPayload($site['payload']);
+    if ((int)($contractPayload['customerRecordId'] ?? 0) !== (int)($sitePayload['customerRecordId'] ?? 0)) {
+        return 'موقع التخصيص لا يتبع عميل العقد';
+    }
+    if (!in_array(hsCanonicalAssetStatus((string)$asset['status'], (string)($assetPayload['status'] ?? '')), ['available', 'reserved'], true)) {
+        return 'الحاوية ليست متاحة للتخصيص';
+    }
+    foreach ($rows as $row) {
+        if ($row['kind'] !== 'container_assignment'
+            || $row['status'] === 'archived'
+            || (int)$row['id'] === $ignoreId) continue;
+        $assignmentPayload = hsPayload($row['payload']);
+        $assignmentStatus = mb_strtolower((string)($assignmentPayload['assignmentStatus'] ?? $row['status']));
+        if ((int)($assignmentPayload['containerRecordId'] ?? 0) === $containerId
+            && in_array($assignmentStatus, ['reserved', 'active'], true)) {
+            return 'الحاوية مرتبطة بتخصيص نشط بالفعل';
+        }
+    }
+    return null;
 }
 
 function hsValidateRecord(PDO $pdo, string $kind, array $payload, ?int $ignoreId = null): void {
@@ -1261,32 +1747,21 @@ function hsUpdateContainerContractLifecycle(PDO $pdo, int $contractId, string $a
             if ($contract['status'] !== 'returned') {
                 throw new RuntimeException('لا يمكن إغلاق العقد قبل استرجاع الحاوية وتسجيل التفريغ أو الإكمال التشغيلي', 422);
             }
-            $contractNumber = trim((string)($contractPayload['contractNumber'] ?? $contract['reference']));
+            $contractNumber = hsContractRecordNumber($contract);
             $collected = 0.0;
             foreach (hsPostedCollections($records) as $row) {
+                if (!hsRecordReferencesContract($row, $contract, $records)) continue;
                 $payload = $row['payload'];
-                $matches = trim((string)($payload['contractNumber'] ?? '')) === $contractNumber
-                    || (int)($payload['contractRecordId'] ?? $payload['contractId'] ?? 0) === $contractId;
-                $allocation = null;
-                if (is_array($payload['allocations'] ?? null)) {
-                    foreach ($payload['allocations'] as $item) {
-                        if (!is_array($item)) continue;
-                        if ((int)($item['contractId'] ?? 0) === $contractId) {
-                            $matches = true;
-                            $allocation = $item;
-                            break;
-                        }
-                    }
-                }
-                if ($matches) $collected += (float)($allocation['amount'] ?? $payload['amount'] ?? 0);
+                $allocation = hsFinancialAllocationForContract($row, $contract, $records);
+                $collected += (float)(is_array($payload['allocations'] ?? null)
+                    ? ($allocation['amount'] ?? 0)
+                    : ($payload['amount'] ?? 0));
             }
             $returned = 0.0;
             foreach ($records as $row) {
                 if ($row['kind'] !== 'payment_return' || $row['status'] !== 'posted') continue;
-                $payload = $row['payload'];
-                if ((int)($payload['contractRecordId'] ?? $payload['contractId'] ?? 0) === $contractId
-                    || trim((string)($payload['contractNumber'] ?? '')) === $contractNumber) {
-                    $returned += (float)($payload['amount'] ?? 0);
+                if (hsRecordReferencesContract($row, $contract, $records)) {
+                    $returned += (float)($row['payload']['amount'] ?? $row['payload']['total'] ?? 0);
                 }
             }
             $total = (float)($contractPayload['total'] ?? $contractPayload['amount'] ?? 0);
@@ -1297,14 +1772,13 @@ function hsUpdateContainerContractLifecycle(PDO $pdo, int $contractId, string $a
             foreach ($records as $invoice) {
                 if ($invoice['kind'] !== 'invoice' || $invoice['status'] === 'archived') continue;
                 $invoicePayload = $invoice['payload'];
-                if ((int)($invoicePayload['contractRecordId'] ?? 0) !== $contractId
-                    && trim((string)($invoicePayload['contractNumber'] ?? '')) !== $contractNumber) continue;
+                if (!hsInvoiceBelongsToContract($invoice, $contract)) continue;
                 $invoiceTotal = (float)($invoicePayload['total'] ?? $invoicePayload['amount'] ?? 0);
                 if (!is_finite($invoiceTotal) || $invoiceTotal <= 0.01) continue;
-                $invoiceRemaining = (float)($invoicePayload['remaining'] ?? ($invoiceTotal - (float)($invoicePayload['paid'] ?? 0)));
+                $invoiceRemaining = max($invoiceTotal - hsInvoiceNetPaidAmount($invoice, $records), 0.0);
                 $postingStmt = $pdo->prepare("SELECT id FROM financial_transactions WHERE source_kind = 'invoice' AND source_id = ? AND status = 'posted' LIMIT 1");
                 $postingStmt->execute([(int)$invoice['id']]);
-                if ($invoice['status'] !== 'paid' || !is_finite($invoiceRemaining) || $invoiceRemaining > 0.01 || !$postingStmt->fetchColumn()) {
+                if (!is_finite($invoiceRemaining) || $invoiceRemaining > 0.01 || !$postingStmt->fetchColumn()) {
                     throw new RuntimeException('لا يمكن إغلاق العقد قبل ترحيل جميع فواتيره وتسويتها بالكامل', 422);
                 }
             }
@@ -1815,7 +2289,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                     'assignment' => ($row = $related('container_assignment')) ? hsRecord($row) : null,
                     'appointment' => ($row = $related('appointment')) ? hsRecord($row) : null,
                     'workOrder' => ($row = $related('work_order')) ? hsRecord($row) : null,
-                    'serviceRequest' => $serviceRequest,
+                    'serviceRequest' => hsServiceRequestForResponse($serviceRequest),
                     'idempotent' => true,
                 ]);
             }
@@ -1845,7 +2319,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                         'assignment' => ($row = $related('container_assignment')) ? hsRecord($row) : null,
                         'appointment' => ($row = $related('appointment')) ? hsRecord($row) : null,
                         'workOrder' => ($row = $related('work_order')) ? hsRecord($row) : null,
-                        'serviceRequest' => $serviceStmt->fetch(PDO::FETCH_ASSOC) ?: null,
+                        'serviceRequest' => hsServiceRequestForResponse($serviceStmt->fetch(PDO::FETCH_ASSOC) ?: null),
                         'idempotent' => true,
                     ]);
                 }
@@ -2022,7 +2496,8 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                 'legacyRequestId' => $existingServiceRequestId > 0 ? $existingServiceRequestId : null,
                 'serviceType' => (string)($service['serviceType'] ?? ($operationType === 'PICKUP_CONTAINER' ? 'استرجاع حاوية' : 'تسليم حاوية')),
                 'containerCode' => (string)($contract['containerCode'] ?? hsAssetCode($assetPayload)),
-                'location' => (string)($service['location'] ?? $contract['location'] ?? 'يحدد لاحقًا'),
+                'location' => hsSplitLocationText((string)($service['location'] ?? $contract['location'] ?? 'يحدد لاحقًا'), $service['locationCoordinates'] ?? $contract['locationCoordinates'] ?? null)['address'] ?: 'الموقع المحدد',
+                'locationCoordinates' => (string)($service['locationCoordinates'] ?? $contract['locationCoordinates'] ?? hsSplitLocationText((string)($service['location'] ?? $contract['location'] ?? ''))['coordinates']),
                 'notes' => (string)($service['notes'] ?? $contract['notes'] ?? ''),
                 'appointmentRecordId' => null,
                 'appointmentType' => (string)($appointment['appointmentType'] ?? 'scheduled'),
@@ -2049,7 +2524,8 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                 ->execute([':reference' => $workOrderPayload['workOrderNumber'], ':id' => $workOrderId]);
             $invoiceRow = null;
             $billingEnabled = !in_array(strtolower(trim((string)($contract['billingEnabled'] ?? 'true'))), ['false', '0', 'no'], true);
-            if ($billingEnabled) {
+            $contractValue = (float)($contract['total'] ?? $contract['amount'] ?? 0);
+            if ($billingEnabled && $contractValue > 0) {
                 $allRows = hsFindRecords($pdo);
                 $billingPeriod = substr((string)($contract['billingPeriod'] ?? $contract['startDate'] ?? $now), 0, 7);
                 $invoiceOperationKey = "contract-{$contractId}-period-{$billingPeriod}";
@@ -2086,7 +2562,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                         'description' => $lineDescription, 'quantity' => 1, 'unitPrice' => $subtotal, 'lineItems' => [$lineItem],
                         'contractTerms' => is_array($contract['contractTerms'] ?? null) ? $contract['contractTerms'] : [],
                     ];
-                    $invoiceInsert = $pdo->prepare("INSERT INTO container_system_records (kind, status, reference, payload, operation_key, created_by, created_at, updated_at) VALUES ('invoice', 'draft', '', :payload, :operation_key, :created_by, :created_at, :updated_at)");
+                    $invoiceInsert = $pdo->prepare("INSERT INTO container_system_records (kind, status, reference, payload, operation_key, created_by, created_at, updated_at) VALUES ('invoice', 'due', '', :payload, :operation_key, :created_by, :created_at, :updated_at)");
                     $invoiceInsert->execute([':payload' => json_encode($invoicePayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':operation_key' => $invoiceOperationKey, ':created_by' => $actorId, ':created_at' => $now, ':updated_at' => $now]);
                     $invoiceId = (int)$pdo->lastInsertId();
                     $invoiceNumber = 'INV-' . str_pad((string)$invoiceId, 5, '0', STR_PAD_LEFT);
@@ -2094,6 +2570,29 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                     $invoicePayload['qrCodeData'] = json_encode(['invoiceNumber' => $invoiceNumber, 'recordId' => $invoiceId, 'total' => $total, 'date' => $invoicePayload['date']], JSON_UNESCAPED_UNICODE);
                     $pdo->prepare("UPDATE container_system_records SET reference = :reference, payload = :payload, updated_at = :updated_at WHERE id = :id")->execute([':reference' => $invoiceNumber, ':payload' => json_encode($invoicePayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':updated_at' => $now, ':id' => $invoiceId]);
                     $invoiceRow = $find($pdo, $invoiceId);
+                } else {
+                    $invoiceRow = $existingInvoice[0];
+                }
+                if ($invoiceRow) {
+                    $invoicePayloadForPosting = hsPayload($invoiceRow['payload'] ?? null);
+                    $invoiceTotalForPosting = (float)($invoicePayloadForPosting['total'] ?? $invoicePayloadForPosting['amount'] ?? 0);
+                    if ($invoiceTotalForPosting > 0) {
+                        $postingCheck = $pdo->prepare("SELECT id FROM financial_transactions WHERE source_kind = 'invoice' AND source_id = ? AND status = 'posted' LIMIT 1");
+                        $postingCheck->execute([(int)$invoiceRow['id']]);
+                        if (!$postingCheck->fetchColumn()) {
+                            $invoicePayloadForPosting['invoiceStatus'] = 'due';
+                            $invoicePayloadForPosting['lifecycleStatus'] = 'due';
+                            $invoicePayloadForPosting['paymentStatus'] = (float)($invoicePayloadForPosting['paid'] ?? 0) > 0 ? 'partially_paid' : 'unpaid';
+                            $invoicePayloadForPosting['amount'] = (float)($invoicePayloadForPosting['amount'] ?? $invoiceTotalForPosting);
+                            $invoicePayloadForPosting['operationKey'] = trim((string)($invoicePayloadForPosting['operationKey'] ?? '')) ?: 'contract-invoice-' . (int)$invoiceRow['id'];
+                            $pdo->prepare("UPDATE container_system_records SET status='due',payload=:payload,updated_at=:updated_at WHERE id=:id")
+                                ->execute([':payload' => json_encode($invoicePayloadForPosting, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':updated_at' => $now, ':id' => (int)$invoiceRow['id']]);
+                            $postingPayload = $invoicePayloadForPosting;
+                            $postingPayload['amount'] = $invoiceTotalForPosting;
+                            hsPostFinancialCore($pdo, 'invoice', (int)$invoiceRow['id'], $postingPayload, trim((string)($invoiceRow['reference'] ?? '')) ?: (string)($invoicePayloadForPosting['invoiceNumber'] ?? 'INV-' . (int)$invoiceRow['id']), $actorId);
+                            $invoiceRow = $find($pdo, (int)$invoiceRow['id']);
+                        }
+                    }
                 }
             }
             $pdo->commit();
@@ -2126,41 +2625,23 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         $deposits = array_filter($rows, static fn(array $row): bool => in_array($row['kind'], ['deposit', 'bank_deposit'], true) && $row['status'] === 'posted');
         $ledgers = [];
         foreach ($contracts as $contract) {
-            $payload = $contract['payload']; $number = (string)($payload['contractNumber'] ?? $contract['reference']);
-            $relatedPayments = array_values(array_filter($payments, static function (array $row) use ($contract, $number): bool {
-                if ((string)($row['payload']['contractNumber'] ?? '') === $number
-                    || (int)($row['payload']['contractRecordId'] ?? $row['payload']['contractId'] ?? 0) === (int)$contract['id']) return true;
-                foreach (($row['payload']['allocations'] ?? []) as $allocation) {
-                    if ((int)($allocation['contractId'] ?? 0) === (int)$contract['id']) return true;
-                }
-                return false;
-            }));
-            $relatedReturns = array_values(array_filter($returns, static function (array $row) use ($contract, $number, $rows): bool {
-                $payload = $row['payload'];
-                if ((string)($payload['contractNumber'] ?? '') === $number
-                    || (int)($payload['contractRecordId'] ?? $payload['contractId'] ?? 0) === (int)$contract['id']) return true;
-                $invoiceId = (int)($payload['originalInvoiceId'] ?? $payload['invoiceRecordId'] ?? 0);
-                if ($invoiceId <= 0) return false;
-                foreach ($rows as $invoice) {
-                    if ($invoice['kind'] !== 'invoice' || (int)$invoice['id'] !== $invoiceId) continue;
-                    $invoicePayload = $invoice['payload'];
-                    return (int)($invoicePayload['contractRecordId'] ?? 0) === (int)$contract['id']
-                        || (string)($invoicePayload['contractNumber'] ?? '') === $number;
-                }
-                return false;
-            }));
-            $relatedDeposits = array_values(array_filter($deposits, static function (array $row) use ($relatedPayments, $contract, $number): bool {
-                $payload = $row['payload'];
-                if ((string)($payload['contractNumber'] ?? '') === $number || (int)($payload['linkedContractId'] ?? 0) === (int)$contract['id']) return true;
+            $payload = $contract['payload']; $number = hsContractRecordNumber($contract);
+            $relatedPayments = array_values(array_filter($payments, static fn(array $row): bool =>
+                hsRecordReferencesContract($row, $contract, $rows)));
+            $relatedReturns = array_values(array_filter($returns, static fn(array $row): bool =>
+                hsRecordReferencesContract($row, $contract, $rows)));
+            $relatedDeposits = array_values(array_filter($deposits, static function (array $row) use ($relatedPayments, $contract, $rows): bool {
+                if (hsRecordReferencesContract($row, $contract, $rows)) return true;
                 foreach ($relatedPayments as $payment) {
-                    if ((int)($payload['sourcePaymentId'] ?? $payload['linkedPaymentId'] ?? 0) === (int)$payment['id']) return true;
+                    if ((int)($row['payload']['sourcePaymentId'] ?? $row['payload']['linkedPaymentId'] ?? 0) === (int)$payment['id']) return true;
                 }
                 return false;
             }));
             $total = (float)($payload['total'] ?? $payload['amount'] ?? 0); $collected = array_sum(array_map(static fn(array $row): float => (float)($row['payload']['amount'] ?? 0), $relatedPayments));
-            $collected = array_sum(array_map(static function (array $row) use ($contract): float {
-                foreach (($row['payload']['allocations'] ?? []) as $allocation) {
-                    if ((int)($allocation['contractId'] ?? 0) === (int)$contract['id']) return (float)($allocation['amount'] ?? 0);
+            $collected = array_sum(array_map(static function (array $row) use ($contract, $rows): float {
+                if (is_array($row['payload']['allocations'] ?? null)) {
+                    $allocation = hsFinancialAllocationForContract($row, $contract, $rows);
+                    return (float)($allocation['amount'] ?? 0);
                 }
                 return (float)($row['payload']['amount'] ?? 0);
             }, $relatedPayments));
@@ -2178,18 +2659,77 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         $operationKey = trim((string)($_SERVER['HTTP_IDEMPOTENCY_KEY'] ?? $input['operationKey'] ?? ''));
         $rows = array_map('hsRecord', hsFindRecords($pdo));
         $requestedInvoiceId = (int)($input['invoiceId'] ?? $input['invoiceRecordId'] ?? 0);
+        $requestedCustomerId = (int)($input['customerRecordId'] ?? 0);
+        $requestedCustomer = null;
+        if ($requestedCustomerId > 0) {
+            foreach ($rows as $row) {
+                if ($row['kind'] === 'customer' && (int)$row['id'] === $requestedCustomerId && $row['status'] !== 'archived') {
+                    $requestedCustomer = $row;
+                    break;
+                }
+            }
+            if (!$requestedCustomer) hsJson(['error' => 'العميل المحدد غير موجود أو مؤرشف'], 422);
+        }
+        $requestedInvoiceNumber = trim((string)($input['invoiceNumber'] ?? ''));
+        $requestedContractFromBody = (int)($input['contractId'] ?? 0);
+        $invoiceCandidates = [];
+        if ($requestedInvoiceId <= 0 && $requestedInvoiceNumber !== '') {
+            foreach ($rows as $row) {
+                if ($row['kind'] !== 'invoice' || $row['status'] === 'archived') continue;
+                $invoicePayload = $row['payload'];
+                $candidateNumber = trim((string)($invoicePayload['invoiceNumber'] ?? $row['reference'] ?? ''));
+                if ($candidateNumber !== $requestedInvoiceNumber) continue;
+                if ($requestedCustomerId > 0) {
+                    $invoiceCustomerId = (int)($invoicePayload['customerRecordId'] ?? 0);
+                    if ($invoiceCustomerId > 0 && $invoiceCustomerId !== $requestedCustomerId) continue;
+                    $linkedContractId = (int)($invoicePayload['contractRecordId'] ?? $invoicePayload['contractId'] ?? $invoicePayload['linkedContractId'] ?? 0);
+                    if ($linkedContractId > 0) {
+                        $linkedContract = null;
+                        foreach ($rows as $candidate) {
+                            if ($candidate['kind'] === 'contract' && (int)$candidate['id'] === $linkedContractId) {
+                                $linkedContract = $candidate;
+                                break;
+                            }
+                        }
+                        if (!$linkedContract) continue;
+                        $linkedCustomerId = (int)($linkedContract['payload']['customerRecordId'] ?? 0);
+                        if ($linkedCustomerId > 0 && $linkedCustomerId !== $requestedCustomerId) continue;
+                        if (!hsInvoiceBelongsToContract($row, $linkedContract)) continue;
+                    }
+                }
+                if ($requestedContractFromBody > 0) {
+                    $requestedContract = null;
+                    foreach ($rows as $candidate) {
+                        if ($candidate['kind'] === 'contract' && (int)$candidate['id'] === $requestedContractFromBody) {
+                            $requestedContract = $candidate;
+                            break;
+                        }
+                    }
+                    if (!$requestedContract || !hsInvoiceBelongsToContract($row, $requestedContract)) continue;
+                }
+                $invoiceCandidates[] = $row;
+            }
+        }
         $requestedInvoice = null;
         foreach ($rows as $row) {
             if ($row['kind'] !== 'invoice' || $row['status'] === 'archived') continue;
             $invoiceNumber = trim((string)($row['payload']['invoiceNumber'] ?? $row['reference'] ?? ''));
-            if (($requestedInvoiceId > 0 && (int)$row['id'] === $requestedInvoiceId)
-                || ($requestedInvoiceId <= 0 && trim((string)($input['invoiceNumber'] ?? '')) !== ''
-                    && $invoiceNumber === trim((string)$input['invoiceNumber']))) {
+            if ($requestedInvoiceId > 0 && (int)$row['id'] === $requestedInvoiceId) {
                 $requestedInvoice = $row;
                 break;
             }
         }
+        if ($requestedInvoiceId <= 0 && count($invoiceCandidates) > 1) {
+            hsJson(['error' => 'رقم الفاتورة غير فريد؛ اختر الفاتورة من القائمة'], 422);
+        }
+        if ($requestedInvoiceId <= 0 && count($invoiceCandidates) === 1) $requestedInvoice = $invoiceCandidates[0];
         $requestedInvoicePayload = $requestedInvoice['payload'] ?? [];
+        if ($requestedCustomerId > 0 && $requestedInvoice) {
+            $invoiceCustomerId = (int)($requestedInvoicePayload['customerRecordId'] ?? 0);
+            if ($invoiceCustomerId > 0 && $invoiceCustomerId !== $requestedCustomerId) {
+                hsJson(['error' => 'الفاتورة لا تتبع العميل المحدد'], 422);
+            }
+        }
         $requestedContractId = (int)($input['contractId'] ?? $requestedInvoicePayload['contractRecordId'] ?? 0);
         if ($requestedContractId <= 0 && $requestedInvoice) {
             $requestedContractNumber = trim((string)($requestedInvoicePayload['contractNumber'] ?? ''));
@@ -2233,58 +2773,54 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             $contract = null;
             foreach ($rows as $row) if ($row['kind'] === 'contract' && (int)$row['id'] === $allocation['contractId'] && $row['status'] !== 'archived') $contract = $row;
             if (!$contract) hsJson(['error' => 'أحد العقود غير موجود أو مؤرشف'], 422);
-            $number = (string)($contract['payload']['contractNumber'] ?? $contract['reference']);
+            $number = hsContractRecordNumber($contract);
+            if ($requestedCustomerId > 0) {
+                $contractCustomerId = (int)($contract['payload']['customerRecordId'] ?? 0);
+                $customerPayload = $requestedCustomer['payload'] ?? [];
+                $expectedCustomerName = trim((string)($customerPayload['name'] ?? $customerPayload['customerName'] ?? ''));
+                $contractCustomerName = trim((string)($contract['payload']['customerName'] ?? ''));
+                if ($contractCustomerId > 0
+                    ? $contractCustomerId !== $requestedCustomerId
+                    : ($expectedCustomerName === '' || $contractCustomerName !== $expectedCustomerName)) {
+                    hsJson(['error' => 'العقد لا يتبع العميل المحدد'], 422);
+                }
+            }
             $paid = 0.0;
             foreach (hsPostedCollections($rows) as $row) {
-                foreach (($row['payload']['allocations'] ?? []) as $item) {
-                    if ((int)($item['contractId'] ?? 0) === $allocation['contractId']) $paid += (float)($item['amount'] ?? 0);
+                if (!hsRecordReferencesContract($row, $contract, $rows)) continue;
+                if (is_array($row['payload']['allocations'] ?? null)) {
+                    $matchingAllocation = hsFinancialAllocationForContract($row, $contract, $rows);
+                    $paid += (float)($matchingAllocation['amount'] ?? 0);
+                } else {
+                    $paid += (float)($row['payload']['amount'] ?? 0);
                 }
-                if (!isset($row['payload']['allocations']) && (string)($row['payload']['contractNumber'] ?? '') === $number) $paid += (float)($row['payload']['amount'] ?? 0);
             }
             foreach ($returnRows as $refund) {
                 $refundPayload = $refund['payload'];
-                $matches = (int)($refundPayload['contractRecordId'] ?? $refundPayload['contractId'] ?? 0) === $allocation['contractId']
-                    || (string)($refundPayload['contractNumber'] ?? '') === $number;
-                if (!$matches && !empty($refundPayload['originalPaymentId'])) {
-                    foreach (hsPostedCollections($rows) as $payment) {
-                        if ((int)$payment['id'] === (int)$refundPayload['originalPaymentId'] &&
-                            ((string)($payment['payload']['contractNumber'] ?? '') === $number ||
-                             (int)($payment['payload']['contractRecordId'] ?? 0) === $allocation['contractId'])) {
-                            $matches = true;
-                            break;
-                        }
-                    }
-                }
+                $matches = hsRecordReferencesContract($refund, $contract, $rows);
                 if ($matches) $paid -= (float)($refundPayload['amount'] ?? $refundPayload['total'] ?? 0);
             }
             $paid = max($paid, 0);
             $total = (float)($contract['payload']['total'] ?? $contract['payload']['amount'] ?? 0);
             if ($total > 0 && $paid + $allocation['amount'] > $total + 0.01) hsJson(['error' => 'قيمة التحصيل تتجاوز المتبقي في العقد'], 422);
-            $contractInvoices = array_values(array_filter($rows, static function (array $row) use ($allocation, $contract, $number): bool {
-                if ($row['kind'] !== 'invoice' || $row['status'] === 'archived') return false;
-                return (int)($row['payload']['contractRecordId'] ?? 0) === $allocation['contractId']
-                    || (string)($row['payload']['contractNumber'] ?? '') === $number;
-            }));
+            $contractInvoices = array_values(array_filter($rows, static fn(array $row): bool =>
+                $row['status'] !== 'archived' && hsInvoiceBelongsToContract($row, $contract)));
             if ($contractInvoices !== [] && $allocation['invoiceId'] === null) {
                 hsJson(['error' => 'حدد فاتورة مرحّلة للتحصيل في العقد ' . $number], 422);
             }
             if ($allocation['invoiceId']) {
                 $invoice = null; foreach ($rows as $row) if ($row['kind'] === 'invoice' && (int)$row['id'] === $allocation['invoiceId']) $invoice = $row;
-                  if (!$invoice || $invoice['status'] === 'archived' || ((int)($invoice['payload']['contractRecordId'] ?? 0) !== $allocation['contractId'] && (string)($invoice['payload']['contractNumber'] ?? '') !== $number)) hsJson(['error' => 'الفاتورة لا تتبع العقد المحدد'], 422);
-                  if (!in_array($invoice['status'], ['posted', 'due', 'overdue', 'partially_paid'], true)) hsJson(['error' => 'لا يمكن التحصيل على فاتورة غير مرحّلة أو مغلقة'], 422);
+                  if (!$invoice || $invoice['status'] === 'archived') hsJson(['error' => 'الفاتورة لا تتبع العقد المحدد'], 422);
+                  $invoiceRelationError = hsSettlementInvoiceRelationError($invoice, $contract, $requestedCustomerId);
+                  if ($invoiceRelationError !== null) hsJson(['error' => $invoiceRelationError], 422);
+                  $invoiceTotal = (float)($invoice['payload']['total'] ?? $invoice['payload']['amount'] ?? 0);
+                  $canIssueContractInvoice = $invoiceTotal > 0
+                      && in_array($invoice['status'], ['approved', 'due', 'overdue', 'partially_paid', 'paid'], true);
+                  if (!in_array($invoice['status'], ['posted', 'due', 'overdue', 'partially_paid'], true) && !$canIssueContractInvoice) hsJson(['error' => 'لا يمكن التحصيل على فاتورة غير مرحّلة أو مغلقة'], 422);
                   $invoicePosting = $pdo->prepare("SELECT id FROM financial_transactions WHERE source_kind = 'invoice' AND source_id = ? AND status = 'posted' LIMIT 1");
                   $invoicePosting->execute([(int)$invoice['id']]);
-                  if (!$invoicePosting->fetchColumn()) hsJson(['error' => 'الفاتورة لم تُرحّل إلى النواة المالية بعد'], 422);
-                 $invoiceTotal = (float)($invoice['payload']['total'] ?? $invoice['payload']['amount'] ?? 0);
-                 $invoicePaid = 0.0;
-                 foreach (hsPostedCollections($rows) as $payment) {
-                     foreach (($payment['payload']['allocations'] ?? []) as $item) {
-                         if ((int)($item['invoiceId'] ?? 0) === $allocation['invoiceId']) $invoicePaid += (float)($item['amount'] ?? 0);
-                     }
-                     if (!isset($payment['payload']['allocations']) && (int)($payment['payload']['invoiceRecordId'] ?? 0) === $allocation['invoiceId']) {
-                         $invoicePaid += (float)($payment['payload']['amount'] ?? 0);
-                     }
-                 }
+                  if (!$invoicePosting->fetchColumn() && !$canIssueContractInvoice) hsJson(['error' => 'الفاتورة لم تُرحّل إلى النواة المالية بعد'], 422);
+                 $invoicePaid = hsInvoiceNetPaidAmount($invoice, $rows);
                  if ($invoiceTotal > 0 && $invoicePaid + $allocation['amount'] > $invoiceTotal + 0.01) hsJson(['error' => 'قيمة التحصيل تتجاوز المتبقي في الفاتورة'], 422);
             }
             $contractRows[] = ['contract' => $contract, 'number' => $number, 'paid' => $paid, 'total' => $total];
@@ -2319,6 +2855,35 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             }
             $pdo->beginTransaction();
         try {
+            foreach ($allocations as $allocation) {
+                $invoiceId = (int)($allocation['invoiceId'] ?? 0);
+                if ($invoiceId <= 0) continue;
+                $posted = $pdo->prepare("SELECT id FROM financial_transactions WHERE source_kind='invoice' AND source_id=? AND status='posted' LIMIT 1");
+                $posted->execute([$invoiceId]);
+                if ($posted->fetchColumn()) continue;
+                $invoiceRow = null;
+                foreach ($rows as $candidate) {
+                    if ($candidate['kind'] === 'invoice' && (int)$candidate['id'] === $invoiceId) {
+                        $invoiceRow = $candidate;
+                        break;
+                    }
+                }
+                if (!$invoiceRow) {
+                    throw new RuntimeException('الفاتورة لم تُرحّل إلى النواة المالية بعد');
+                }
+                $invoicePayload = $invoiceRow['payload'];
+                $invoiceTotal = (float)($invoicePayload['total'] ?? $invoicePayload['amount'] ?? 0);
+                if ($invoiceTotal <= 0) throw new RuntimeException('لا يمكن ترحيل فاتورة بقيمة غير موجبة');
+                $invoicePayload['invoiceStatus'] = 'due';
+                $invoicePayload['lifecycleStatus'] = 'due';
+                $invoicePayload['paymentStatus'] = (float)($invoicePayload['paid'] ?? 0) > 0 ? 'partially_paid' : 'unpaid';
+                $invoicePayload['operationKey'] = trim((string)($invoicePayload['operationKey'] ?? '')) ?: 'contract-invoice-' . $invoiceId;
+                $pdo->prepare("UPDATE container_system_records SET status='due',payload=:payload,updated_at=:updated_at WHERE id=:id")
+                    ->execute([':payload' => json_encode($invoicePayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':updated_at' => $now, ':id' => $invoiceId]);
+                $postingPayload = $invoicePayload;
+                $postingPayload['amount'] = $invoiceTotal;
+                hsPostFinancialCore($pdo, 'invoice', $invoiceId, $postingPayload, trim((string)($invoiceRow['reference'] ?? '')) ?: (string)($invoicePayload['invoiceNumber'] ?? 'INV-' . $invoiceId), $actorId);
+            }
             $insert = $pdo->prepare("INSERT INTO container_system_records (kind,status,reference,payload,operation_key,created_by,created_at,updated_at) VALUES ('payment','posted',:reference,:payload,:operation_key,:created_by,:created_at,:updated_at)");
             $insert->execute([':reference' => 'PAY-' . time(), ':payload' => json_encode($paymentPayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), ':operation_key' => $operationKey, ':created_by' => $actorId, ':created_at' => $now, ':updated_at' => $now]);
             $paymentId = (int)$pdo->lastInsertId();
@@ -2339,17 +2904,10 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                         if ($invoice['kind'] !== 'invoice' || (int)$invoice['id'] !== $invoiceId || $invoice['status'] === 'archived') continue;
                         $invoicePayload = $invoice['payload'];
                         $invoiceTotal = (float)($invoicePayload['total'] ?? $invoicePayload['amount'] ?? 0);
-                        $invoicePaid = 0.0;
-                        foreach (hsPostedCollections($rows) as $payment) {
-                            foreach (($payment['payload']['allocations'] ?? []) as $existingAllocation) {
-                                if ((int)($existingAllocation['invoiceId'] ?? 0) === $invoiceId) $invoicePaid += (float)($existingAllocation['amount'] ?? 0);
-                            }
-                            if (!isset($payment['payload']['allocations']) && (int)($payment['payload']['invoiceRecordId'] ?? 0) === $invoiceId) $invoicePaid += (float)($payment['payload']['amount'] ?? 0);
-                        }
-                        $invoicePaid += $allocations[$index]['amount'];
+                        $invoicePaid = hsInvoiceNetPaidAmount($invoice, $rows) + $allocations[$index]['amount'];
                         $invoiceRemaining = max($invoiceTotal - $invoicePaid, 0);
                         $dueDate = (string)($invoicePayload['dueDate'] ?? $invoicePayload['date'] ?? '');
-                        $invoiceStatus = $invoiceRemaining <= 0.01 ? 'paid' : ($dueDate !== '' && strtotime($dueDate) < time() ? 'overdue' : ($invoicePaid > 0 ? 'partially_paid' : 'due'));
+                        $invoiceStatus = $invoiceRemaining <= 0.01 ? 'paid' : ($invoicePaid > 0 ? 'partially_paid' : 'due');
                         $invoicePayload['paid'] = $invoicePaid;
                         $invoicePayload['remaining'] = $invoiceRemaining;
                         $invoicePayload['invoiceStatus'] = $invoiceStatus;
@@ -2548,6 +3106,34 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                     $ledgerStmt = $pdo->prepare("INSERT INTO container_system_records (kind, status, reference, payload, created_by, created_at, updated_at) VALUES ('ledger_entry', 'posted', :reference, :payload, :created_by, :created_at, :updated_at)");
                     $ledgerStmt->execute([':reference' => 'LED-' . $id, ':payload' => json_encode($ledger, JSON_UNESCAPED_UNICODE), ':created_by' => $actorId, ':created_at' => $now, ':updated_at' => $now]);
                 }
+                if (in_array((string)$current['kind'], ['payment', 'receipt', 'payment_return'], true)
+                    && $current['status'] !== $nextStatus
+                    && in_array((string)$current['status'], ['posted'], true) !== in_array($nextStatus, ['posted'], true)) {
+                    $syncRows = array_map('hsRecord', hsFindRecords($pdo));
+                    $syncRecord = null;
+                    foreach ($syncRows as $row) {
+                        if ((int)$row['id'] === $id) {
+                            $syncRecord = $row;
+                            break;
+                        }
+                    }
+                    if ($syncRecord) {
+                        $invoiceUpdateStmt = $pdo->prepare("UPDATE container_system_records
+                            SET status=:status,payload=:payload,updated_at=:updated_at WHERE id=:id");
+                        foreach (hsInvoiceSettlementUpdatesForRecord($syncRecord, $syncRows) as $invoiceUpdate) {
+                            $before = json_encode($invoiceUpdate['invoice']['payload'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                            $after = json_encode($invoiceUpdate['payload'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                            $invoiceId = (int)$invoiceUpdate['invoice']['id'];
+                            $invoiceUpdateStmt->execute([
+                                ':status' => $invoiceUpdate['status'],
+                                ':payload' => $after,
+                                ':updated_at' => $now,
+                                ':id' => $invoiceId,
+                            ]);
+                            hsAudit($pdo, $invoiceId, 'invoice', 'invoice_settlement_sync', $before, $after, $actorId);
+                        }
+                    }
+                }
                 $updated = $pdo->prepare("SELECT * FROM container_system_records WHERE id = :id");
                 $updated->execute([':id' => $id]);
                 $pdo->commit();
@@ -2564,7 +3150,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         if (!in_array($kind, hsSupportedKinds(), true)) hsJson(['error' => 'نوع السجل غير مدعوم'], 400);
         if (!hsCanManage($admin, $kind)) hsJson(['error' => 'ليس لديك صلاحية لهذه العملية'], 403);
         $operationKey = trim((string)($_SERVER['HTTP_IDEMPOTENCY_KEY'] ?? $input['operationKey'] ?? $payload['operationKey'] ?? ''));
-        if ((in_array($kind, hsFinancialLifecycleKinds(), true) || $kind === 'contract') && $operationKey !== '') {
+        if ((in_array($kind, hsFinancialLifecycleKinds(), true) || in_array($kind, ['contract', 'container_assignment'], true)) && $operationKey !== '') {
             if (strlen($operationKey) < 8 || strlen($operationKey) > 160) hsJson(['error' => 'مفتاح العملية غير صالح'], 422);
             $payload['operationKey'] = $operationKey;
             $existingStmt = $pdo->prepare("SELECT * FROM container_system_records WHERE kind = ? AND operation_key = ? AND status <> 'archived' ORDER BY id DESC LIMIT 1");
@@ -2589,6 +3175,10 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             : (in_array($kind, hsFinancialLifecycleKinds(), true)
                 ? $initialFinancialStatus
                 : (string)($input['status'] ?? 'active'));
+        if ($kind === 'container_assignment') {
+            $assignmentError = hsContainerAssignmentError($pdo, $payload);
+            if ($assignmentError !== null) hsJson(['error' => $assignmentError], 409);
+        }
         if ($kind === 'contract'
             && in_array($status, ['active', 'issued', 'scheduled', 'delivered'], true)
             && hsContractHasOverlappingDates($pdo, $payload)) {
@@ -2596,6 +3186,13 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
         }
         $pdo->beginTransaction();
         try {
+            if ($kind === 'container_assignment') {
+                $assignmentError = hsContainerAssignmentError($pdo, $payload);
+                if ($assignmentError !== null) {
+                    $pdo->rollBack();
+                    hsJson(['error' => $assignmentError], 409);
+                }
+            }
             if ($kind === 'contract'
                 && in_array($status, ['active', 'issued', 'scheduled', 'delivered'], true)
                 && hsContractHasOverlappingDates($pdo, $payload)) {
@@ -2608,8 +3205,123 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
             $id = (int)$pdo->lastInsertId();
             $reference = hsReference($kind, $payload, $id);
             $pdo->prepare("UPDATE container_system_records SET reference = :reference WHERE id = :id")->execute([':reference' => $reference, ':id' => $id]);
-            hsAudit($pdo, $id, $kind, 'create', null, json_encode($payload, JSON_UNESCAPED_UNICODE), $actorId);
+            if ($kind !== 'container_assignment') {
+                hsAudit($pdo, $id, $kind, 'create', null, json_encode($payload, JSON_UNESCAPED_UNICODE), $actorId);
+            }
             if ($kind === 'container_movement') hsSyncMovement($pdo, $payload, $actorId);
+            if ($kind === 'container_assignment') {
+                $records = hsFindRecords($pdo);
+                $contract = $asset = $site = null;
+                foreach ($records as $record) {
+                    if ((int)$record['id'] === (int)$payload['contractRecordId'] && $record['kind'] === 'contract') $contract = $record;
+                    if ((int)$record['id'] === (int)$payload['containerRecordId'] && in_array($record['kind'], ['container', 'container_asset'], true)) $asset = $record;
+                    if ((int)$record['id'] === (int)$payload['siteRecordId'] && $record['kind'] === 'customer_site') $site = $record;
+                }
+                if (!$contract || !$asset || !$site) throw new RuntimeException('العقد أو الحاوية أو موقع العميل غير موجود', 422);
+
+                $contractPayload = hsPayload($contract['payload']);
+                $assetPayload = hsPayload($asset['payload']);
+                $sitePayload = hsPayload($site['payload']);
+                $customerId = (int)($contractPayload['customerRecordId'] ?? 0);
+                $contractNumber = hsContractRecordNumber($contract);
+                $containerCode = hsAssetCode($assetPayload) ?: trim((string)$asset['reference']);
+                $scheduleDate = substr((string)($payload['startDate'] ?? $payload['scheduleDate'] ?? date('Y-m-d')), 0, 10);
+                $scheduledAt = (string)($payload['scheduledAt'] ?? ($scheduleDate . 'T09:00:00'));
+                $workOrderNumber = 'WO-' . (int)$contract['id'] . '-A' . $id;
+                $workOrderPayload = [
+                    'workOrderNumber' => $workOrderNumber,
+                    'customerRecordId' => $customerId > 0 ? $customerId : null,
+                    'customerName' => $contractPayload['customerName'] ?? '',
+                    'customerPhone' => $contractPayload['customerPhone'] ?? '',
+                    'contractRecordId' => (int)$contract['id'],
+                    'contractNumber' => $contractNumber,
+                    'containerRecordId' => (int)$asset['id'],
+                    'containerCode' => $containerCode,
+                    'containerTypeId' => $assetPayload['containerTypeId'] ?? null,
+                    'siteRecordId' => (int)$site['id'],
+                    'siteName' => $sitePayload['siteName'] ?? $sitePayload['name'] ?? '',
+                    'location' => $sitePayload['address'] ?? $sitePayload['location'] ?? $contractPayload['location'] ?? '',
+                    'locationCoordinates' => $sitePayload['locationCoordinates'] ?? $sitePayload['coordinates'] ?? null,
+                    'operationType' => 'DELIVER_CONTAINER',
+                    'serviceType' => 'تسليم حاوية',
+                    'assignmentRecordId' => $id,
+                    'startDate' => $scheduleDate,
+                    'scheduleDate' => $scheduleDate,
+                    'scheduledAt' => $scheduledAt,
+                    'appointmentType' => 'scheduled',
+                    'durationDays' => (float)($contractPayload['durationDays'] ?? 0) ?: null,
+                    'driverStatus' => 'unassigned',
+                    'status' => 'new',
+                    'source' => 'container_assignment',
+                    'notes' => trim((string)($payload['notes'] ?? '')) ?: 'تسليم حاوية مضافة إلى عقد قائم',
+                ];
+                $workOrderJson = json_encode($workOrderPayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                $workOrderInsert = $pdo->prepare("INSERT INTO container_system_records (kind,status,reference,payload,operation_key,created_by,created_at,updated_at) VALUES ('work_order','new',:reference,:payload,NULL,:created_by,:created_at,:updated_at)");
+                $workOrderInsert->execute([
+                    ':reference' => $workOrderNumber,
+                    ':payload' => $workOrderJson,
+                    ':created_by' => $actorId,
+                    ':created_at' => $now,
+                    ':updated_at' => $now,
+                ]);
+                $workOrderId = (int)$pdo->lastInsertId();
+
+                $assignmentPayload = array_merge($payload, [
+                    'assignmentRecordId' => $id,
+                    'assignmentStatus' => 'reserved',
+                    'contractNumber' => $contractNumber,
+                    'customerRecordId' => $customerId > 0 ? $customerId : null,
+                    'containerCode' => $containerCode,
+                    'workOrderRecordId' => $workOrderId,
+                    'workOrderNumber' => $workOrderNumber,
+                ]);
+                $assignmentJson = json_encode($assignmentPayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                $pdo->prepare("UPDATE container_system_records SET status='reserved',payload=:payload,updated_at=:updated_at WHERE id=:id")
+                    ->execute([':payload' => $assignmentJson, ':updated_at' => $now, ':id' => $id]);
+
+                $nextAssetPayload = array_merge($assetPayload, [
+                    'status' => 'reserved',
+                    'assignmentRecordId' => $id,
+                    'assignedContractRecordId' => (int)$contract['id'],
+                    'assignedSiteRecordId' => (int)$site['id'],
+                ]);
+                $assetJson = json_encode($nextAssetPayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                $pdo->prepare("UPDATE container_system_records SET status='reserved',payload=:payload,updated_at=:updated_at WHERE id=:id")
+                    ->execute([':payload' => $assetJson, ':updated_at' => $now, ':id' => (int)$asset['id']]);
+
+                $primaryContainerId = (int)($contractPayload['containerRecordId'] ?? $contractPayload['assignedContainerRecordId'] ?? 0);
+                $assignmentIds = array_values(array_unique(array_merge(
+                    array_map('intval', is_array($contractPayload['containerAssignmentRecordIds'] ?? null) ? $contractPayload['containerAssignmentRecordIds'] : []),
+                    [$id],
+                )));
+                $additionalIds = is_array($contractPayload['additionalContainerRecordIds'] ?? null)
+                    ? array_map('intval', $contractPayload['additionalContainerRecordIds'])
+                    : [];
+                if ($primaryContainerId > 0 && $primaryContainerId !== (int)$asset['id']) $additionalIds[] = (int)$asset['id'];
+                $nextContractPayload = array_merge($contractPayload, [
+                    'containerAssignmentRecordIds' => array_values(array_unique($assignmentIds)),
+                    'additionalContainerRecordIds' => array_values(array_unique(array_filter($additionalIds, static fn(int $value): bool => $value > 0))),
+                    'latestContainerAssignmentRecordId' => $id,
+                    'latestWorkOrderRecordId' => $workOrderId,
+                ]);
+                if ($primaryContainerId <= 0) {
+                    $nextContractPayload = array_merge($nextContractPayload, [
+                        'containerRecordId' => (int)$asset['id'],
+                        'assignedContainerRecordId' => (int)$asset['id'],
+                        'assignedSiteRecordId' => (int)$site['id'],
+                        'containerCode' => $containerCode,
+                        'assignmentRecordId' => $id,
+                        'assignmentStatus' => 'reserved',
+                    ]);
+                }
+                $contractJson = json_encode($nextContractPayload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                $pdo->prepare("UPDATE container_system_records SET payload=:payload,updated_at=:updated_at WHERE id=:id")
+                    ->execute([':payload' => $contractJson, ':updated_at' => $now, ':id' => (int)$contract['id']]);
+                hsAudit($pdo, (int)$asset['id'], (string)$asset['kind'], 'assignment_reserved', (string)$asset['payload'], $assetJson, $actorId);
+                hsAudit($pdo, (int)$contract['id'], 'contract', 'assignment_reserved', (string)$contract['payload'], $contractJson, $actorId);
+                hsAudit($pdo, $workOrderId, 'work_order', 'create', null, $workOrderJson, $actorId);
+                hsAudit($pdo, $id, $kind, 'create', null, $assignmentJson, $actorId);
+            }
             if (in_array($kind, ['payment', 'receipt', 'expense', 'deposit', 'bank_deposit', 'bank_fee', 'invoice', 'invoice_return', 'payment_return', 'transfer', 'purchase', 'purchase_return', 'other_revenue'], true)
                 && $status === 'posted') {
                 hsPostFinancialCore($pdo, $kind, $id, $payload, $reference, $actorId);

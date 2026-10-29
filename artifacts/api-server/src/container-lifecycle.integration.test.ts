@@ -300,13 +300,26 @@ async function main() {
     status: "new",
     testData: true,
   }, collisionId);
+  const collisionAsset = insertRecord("container_asset", "available", "TEST-ID-COLLISION-ASSET", {
+    assetCode: "TEST-ID-COLLISION-ASSET",
+    status: "available",
+    testData: true,
+  });
+  const collisionContract = insertRecord("contract", "active", "TEST-ID-COLLISION-CONTRACT", {
+    contractNumber: "TEST-ID-COLLISION-CONTRACT",
+    containerRecordId: collisionAsset.id,
+    containerCode: "TEST-ID-COLLISION-ASSET",
+    testData: true,
+  });
   const collisionServiceRequest = db.insert(serviceRequestsTable).values({
     id: collisionId,
     clientName: "TEST ONLY — colliding request",
     phone: testPhone,
-    serviceType: "TEST ONLY — collision service request",
+    serviceType: "تسليم حاوية — TEST ONLY",
     containerSize: "none",
     location: testLocation,
+    contractRecordId: collisionContract.id,
+    containerRecordId: collisionAsset.id,
     scheduledAt: "2026-10-30T08:00:00.000Z",
     duration: "1 hour",
     appointmentType: "scheduled",
@@ -377,6 +390,8 @@ async function main() {
   });
   const unknownAppointment = insertRecord("appointment", "scheduled", "TEST-UNKNOWN-APPOINTMENT", {
     appointmentType: "scheduled",
+    contractRecordId: reconciliationContract.id,
+    containerRecordId: reconciliationAsset.id,
     scheduledAt: "2034-07-03T10:00:00.000Z",
     testData: true,
   });
@@ -1061,6 +1076,18 @@ async function main() {
     assert.ok(intakeBody.customerRecordId);
     assert.notEqual(intakeBody.customerRecordId, customer.id,
       "an unverified public phone must not claim an existing customer profile");
+    db.insert(containerSystemRecordsTable).values({
+      kind: "work_order",
+      status: "new",
+      reference: `TEST-LEGACY-INTAKE-WORK-ORDER-${intakeBody.id}`,
+      payload: JSON.stringify({
+        legacyRequestId: intakeBody.id,
+        serviceType: "TEST ONLY — legacy intake work order",
+        driverStatus: "unassigned",
+        status: "new",
+        testData: true,
+      }),
+    }).run();
     const safeRequestCancellation = await fetch(`http://127.0.0.1:${port}/api/service-requests/${intakeBody.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json", authorization },
@@ -1165,6 +1192,10 @@ async function main() {
       "posting a deposit must not imply that a bank statement confirmed it",
     );
 
+    const invoiceCountBeforeDirectPost = (
+      sqlite.prepare("SELECT COUNT(*) AS count FROM container_system_records WHERE kind = 'invoice'")
+        .get() as { count: number }
+    ).count;
     const bypassApproval = await fetch(`http://127.0.0.1:${port}/api/admin/container-system/records`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization },
@@ -1185,7 +1216,7 @@ async function main() {
     assert.equal(bypassApproval.status, 422, "new financial records must not skip the approval lifecycle");
     assert.equal(
       (sqlite.prepare("SELECT COUNT(*) AS count FROM container_system_records WHERE kind = 'invoice'").get() as { count: number }).count,
-      1,
+      invoiceCountBeforeDirectPost,
       "a rejected direct posting must not leave an invoice record",
     );
 

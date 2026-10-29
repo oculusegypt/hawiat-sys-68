@@ -2815,7 +2815,7 @@ function hostingerContainerSystemRoute(PDO $pdo, string $path, string $method, a
                   if ($invoiceRelationError !== null) hsJson(['error' => $invoiceRelationError], 422);
                   $invoiceTotal = (float)($invoice['payload']['total'] ?? $invoice['payload']['amount'] ?? 0);
                   $canIssueContractInvoice = $invoiceTotal > 0
-                      && !in_array($invoice['status'], ['cancelled', 'rejected', 'archived'], true);
+                      && in_array($invoice['status'], ['approved', 'due', 'overdue', 'partially_paid', 'paid'], true);
                   if (!in_array($invoice['status'], ['posted', 'due', 'overdue', 'partially_paid'], true) && !$canIssueContractInvoice) hsJson(['error' => 'لا يمكن التحصيل على فاتورة غير مرحّلة أو مغلقة'], 422);
                   $invoicePosting = $pdo->prepare("SELECT id FROM financial_transactions WHERE source_kind = 'invoice' AND source_id = ? AND status = 'posted' LIMIT 1");
                   $invoicePosting->execute([(int)$invoice['id']]);
